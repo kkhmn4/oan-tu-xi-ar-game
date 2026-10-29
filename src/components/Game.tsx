@@ -394,7 +394,7 @@ function getBanner(s: GameState): Banner {
           pulse: true,
         };
       }
-      if (s.beat === 0) return { text: 'LẮC TAY!', sub: 'Lắc qua lại cho vòng cam đầy', color: 'var(--rock)' };
+      if (s.beat === 0) return { text: 'LẮC TAY!', sub: 'Lắc qua lại 3 lần cho vòng cam đầy', color: 'var(--rock)' };
       if (s.beat === 1) return { text: 'OẲN', sub: 'Lắc tiếp!', color: 'var(--rock)' };
       return { text: 'TÙ', sub: 'Lắc thêm chút nữa là mở thẻ!', color: 'var(--sky)' };
     }
@@ -516,7 +516,7 @@ function HandStage({
             strokeLinecap="round"
             strokeDasharray={RING_LEN}
             strokeDashoffset={RING_LEN * (1 - fill)}
-            style={{ transition: 'stroke-dashoffset 60ms linear' }}
+            style={{ transition: 'stroke-dashoffset 180ms ease-out' }}
           />
         </svg>
       )}

@@ -51,7 +51,7 @@ export function Tutorial({ isFullscreen, onBack, onToggleFullscreen, onStart }: 
             </div>
           </Step>
 
-          <Step n={3} color="var(--rock)" title="Lắc tay" text="Lắc tay qua lại cho vòng quanh tay đầy dần. Máy hô OẲN, TÙ, XÌ theo vòng.">
+          <Step n={3} color="var(--rock)" title="Lắc tay" text="Lắc tay qua lại khoảng 3 lần, vòng quanh tay đầy dần. Máy hô OẲN, TÙ, XÌ theo vòng.">
             <img src={RPS_CHOICES.scissors.image} alt="" className="h-full object-contain anim-wiggle" />
           </Step>
 
