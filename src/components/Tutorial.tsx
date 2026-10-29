@@ -10,13 +10,6 @@ interface TutorialProps {
   onStart: () => void;
 }
 
-const BEAT_STRIP = [
-  { word: '🔒 CHỐT', c: 'var(--ink)', note: 'giữ yên tay' },
-  { word: 'OẲN', c: 'var(--rock)', note: 'lắc, vòng 1/3' },
-  { word: 'TÙ', c: 'var(--sky)', note: 'lắc, vòng 2/3' },
-  { word: 'XÌ', c: 'var(--lose)', note: 'vòng đầy, mở thẻ' },
-];
-
 export function Tutorial({ isFullscreen, onBack, onToggleFullscreen, onStart }: TutorialProps) {
   return (
     <div className="stage flex-1 flex flex-col h-full overflow-hidden">
@@ -66,41 +59,28 @@ export function Tutorial({ isFullscreen, onBack, onToggleFullscreen, onStart }: 
           </Step>
         </div>
 
-        <div className="card w-full p-3 flex flex-col items-center gap-2" style={{ ['--c' as string]: 'var(--sun)', ['--cs' as string]: 'var(--sun-dark)' }}>
-          <span className="font-extrabold text-lg sm:text-xl">Nhịp của một lượt: chốt tay trước, rồi lắc cho vòng đầy</span>
-          <div className="flex flex-wrap items-center justify-center gap-1.5 sm:gap-2">
-            {BEAT_STRIP.map((b, i) => (
-              <div key={b.word} className="flex items-center gap-1.5 sm:gap-2">
-                <div className="flex flex-col items-center">
-                  <span className="chip title text-2xl sm:text-3xl px-4 py-1" style={{ ['--c' as string]: b.c, boxShadow: '0 4px 0 rgba(0,0,0,.18)' }}>
-                    {b.word}
-                  </span>
-                  <span className="text-sm sm:text-base font-bold text-[var(--ink-soft)] mt-1">{b.note}</span>
-                </div>
-                {i < BEAT_STRIP.length - 1 && <span className="title text-3xl text-[var(--line)] -mt-5">›</span>}
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-3">
+        <div className="grid grid-cols-3 gap-3 w-full">
           {ALL_RPS_CHOICES.map((c) => (
-            <div key={c} className="flex items-center gap-2 rounded-2xl bg-white border-[3px] pl-1 pr-3 py-1" style={{ borderColor: RPS_CHOICES[c].color }}>
-              <div className="w-11 h-11 rounded-xl p-0.5" style={{ background: RPS_CHOICES[c].soft }}>
+            <div
+              key={c}
+              className="flex items-center gap-3 rounded-3xl bg-white border-4 p-2.5 sm:p-3"
+              style={{ borderColor: RPS_CHOICES[c].color, boxShadow: `0 6px 0 ${RPS_CHOICES[c].color}` }}
+            >
+              <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-2xl p-1 shrink-0" style={{ background: RPS_CHOICES[c].soft }}>
                 <HandSkeletonSvg gesture={c} color={RPS_CHOICES[c].color} glow={false} />
               </div>
-              <div className="flex flex-col leading-tight">
-                <span className="font-extrabold text-lg" style={{ color: RPS_CHOICES[c].color }}>{RPS_CHOICES[c].label}</span>
-                <span className="text-sm sm:text-base font-bold">{RPS_CHOICES[c].pose}</span>
+              <div className="flex flex-col leading-tight min-w-0">
+                <span className="title text-3xl sm:text-4xl" style={{ color: RPS_CHOICES[c].color }}>{RPS_CHOICES[c].label}</span>
+                <span className="text-lg sm:text-xl font-extrabold text-balance">{RPS_CHOICES[c].pose}</span>
               </div>
             </div>
           ))}
         </div>
 
-        <div className="flex flex-wrap items-center justify-center gap-2 text-base sm:text-lg font-extrabold">
-          <span className="chip" style={{ ['--c' as string]: 'var(--sky)' }}>Vòng 1: bạn thứ nhất, 5 lượt</span>
-          <span className="chip" style={{ ['--c' as string]: 'var(--grape)' }}>Vòng 2: đổi bạn thứ hai, 5 lượt</span>
-          <span className="chip" style={{ ['--c' as string]: 'var(--sun-dark)' }}>Thắng +100 ⭐, hòa +30 ⭐</span>
+        <div className="flex flex-wrap items-center justify-center gap-3 text-xl sm:text-2xl font-extrabold">
+          <span className="chip px-5 py-1.5" style={{ ['--c' as string]: 'var(--sky)' }}>Vòng 1: bạn thứ nhất, 5 lượt</span>
+          <span className="chip px-5 py-1.5" style={{ ['--c' as string]: 'var(--grape)' }}>Vòng 2: đổi bạn thứ hai, 5 lượt</span>
+          <span className="chip px-5 py-1.5" style={{ ['--c' as string]: 'var(--sun-dark)' }}>Thắng +100 ⭐, hòa +30 ⭐</span>
         </div>
 
         <button type="button" onClick={onStart} className="btn btn-win min-h-[66px] text-2xl px-12">
