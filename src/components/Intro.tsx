@@ -78,10 +78,10 @@ export function Intro({ profile, difficulty, isFullscreen, onSelectDifficulty, o
       </div>
       <TopBar title="Trò chơi AR" isFullscreen={isFullscreen} onToggleFullscreen={onToggleFullscreen} />
 
-      <main className="flex-1 min-h-0 overflow-y-auto flex flex-col md:flex-row items-center justify-center gap-4 lg:gap-10 px-4 py-3 max-w-6xl mx-auto w-full">
+      <main className="flex-1 min-h-0 overflow-y-auto flex flex-col md:flex-row items-center justify-center-safe fit-short gap-4 lg:gap-10 px-4 py-3 max-w-6xl mx-auto w-full">
         <div className="flex flex-col gap-3 max-w-lg w-full anim-slide-up">
           <div>
-            <h1 className="title outline-text text-[clamp(3.2rem,8vw,6.5rem)] flex flex-wrap gap-x-4">
+            <h1 className="title outline-text flex gap-x-4 whitespace-nowrap" style={{ fontSize: 'clamp(2.8rem, min(6.2vw, 11vh), 5.6rem)' }}>
               <span style={{ color: 'var(--rock)' }}>OẲN</span>
               <span style={{ color: 'var(--sky)' }}>TÙ</span>
               <span style={{ color: 'var(--scissors)' }}>XÌ</span>

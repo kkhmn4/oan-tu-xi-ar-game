@@ -1,14 +1,14 @@
 @import 'tailwindcss';
 
-/* Baloo 2: chữ tròn, dày, đủ dấu tiếng Việt, hợp học sinh nhỏ. */
-@import '@fontsource/baloo-2/vietnamese-500.css';
-@import '@fontsource/baloo-2/vietnamese-600.css';
-@import '@fontsource/baloo-2/vietnamese-700.css';
-@import '@fontsource/baloo-2/vietnamese-800.css';
-@import '@fontsource/baloo-2/latin-500.css';
-@import '@fontsource/baloo-2/latin-600.css';
-@import '@fontsource/baloo-2/latin-700.css';
-@import '@fontsource/baloo-2/latin-800.css';
+/* Nunito: chữ tròn, dày, dấu chồng tiếng Việt (Ầ, Ế, Ể, Ẳ) tách rõ ở cỡ lớn. Baloo 2 vẽ dấu chồng quá dẹt nên đã bỏ. */
+@import '@fontsource/nunito/vietnamese-600.css';
+@import '@fontsource/nunito/vietnamese-700.css';
+@import '@fontsource/nunito/vietnamese-800.css';
+@import '@fontsource/nunito/vietnamese-900.css';
+@import '@fontsource/nunito/latin-600.css';
+@import '@fontsource/nunito/latin-700.css';
+@import '@fontsource/nunito/latin-800.css';
+@import '@fontsource/nunito/latin-900.css';
 
 /* Bảng màu sân chơi: màu đặc, không chuyển màu.
    Mỗi thế tay một màu (Búa cam, Kéo hồng, Bao xanh lá), người chơi xanh trời, máy tím. */
@@ -52,7 +52,7 @@ body,
 body {
   background: var(--cream);
   color: var(--ink);
-  font-family: 'Baloo 2', system-ui, sans-serif;
+  font-family: 'Nunito', system-ui, sans-serif;
   font-weight: 600;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
@@ -154,8 +154,10 @@ body {
 
 /* ---------- Chữ tiêu đề ---------- */
 .title {
-  font-weight: 800;
-  line-height: 0.95;
+  font-weight: 900;
+  /* Chữ hoa có dấu chồng (Ầ, Ế, Ẳ) cần khoảng trên, không dùng line-height dưới 1.2 */
+  line-height: 1.22;
+  padding-top: 0.06em;
   letter-spacing: 0.01em;
 }
 .outline-text {
@@ -178,6 +180,10 @@ body {
 @keyframes flash { 0% { opacity: 0.85; } 100% { opacity: 0; } }
 @keyframes ping { 0% { transform: scale(1); opacity: 0.7; } 100% { transform: scale(1.6); opacity: 0; } }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes drop { 0% { transform: translateY(-6%); } 35% { transform: translateY(14%) scaleY(0.93); } 100% { transform: translateY(0); } }
+@keyframes pulse-text { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
+@keyframes shake-once { 0%, 100% { transform: translateX(0); } 15%, 55% { transform: translateX(-18px); } 35%, 75% { transform: translateX(18px); } }
+@keyframes edge-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
 
 @layer components {
 .anim-float { animation: float 3.2s ease-in-out infinite; }
@@ -192,6 +198,19 @@ body {
 .anim-flash { animation: flash 0.5s ease-out both; }
 .anim-ping { animation: ping 1.2s ease-out infinite; }
 .anim-fade { animation: fade-in 0.3s ease-out both; }
+.anim-drop { animation: drop 0.32s ease-out both; }
+.anim-pulse-text { animation: pulse-text 0.8s ease-in-out infinite; }
+.anim-shake-once { animation: shake-once 0.45s ease-in-out both; }
+
+/* Viền sáng quanh màn hình: báo XÌ (đỏ) và kết quả (xanh, đỏ, vàng) mà không cần thêm chữ */
+.edge-glow {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 12px var(--g), inset 0 0 70px 24px color-mix(in srgb, var(--g) 40%, transparent);
+}
+.edge-pulse { animation: edge-pulse 0.4s ease-in-out infinite; }
 
 }
 
@@ -214,4 +233,9 @@ body {
   background: var(--c, var(--sky));
   transition: width 0.08s linear;
 }
+}
+
+/* Máy tính bảng màn thấp (1024x600): thu nhỏ đều các trang nội dung để vừa một màn, không phải cuộn */
+@media (max-height: 680px) {
+  .fit-short { zoom: 0.78; }
 }

@@ -11,9 +11,9 @@ interface TutorialProps {
 }
 
 const BEAT_STRIP = [
-  { word: 'OẲN', c: 'var(--rock)', note: 'lắc tay' },
-  { word: 'TÙ', c: 'var(--sky)', note: 'lắc tay' },
-  { word: 'XÌ', c: 'var(--lose)', note: 'ra tay, giữ yên' },
+  { word: 'OẲN', c: 'var(--rock)', note: 'lắc lần 1' },
+  { word: 'TÙ', c: 'var(--sky)', note: 'lắc lần 2' },
+  { word: 'XÌ', c: 'var(--lose)', note: 'lắc lần 3, ra tay' },
   { word: '🔒 CHỐT', c: 'var(--ink)', note: 'máy khóa tay em' },
 ];
 
@@ -34,7 +34,7 @@ export function Tutorial({ isFullscreen, onBack, onToggleFullscreen, onStart }: 
         }
       />
 
-      <main className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center justify-center gap-3 sm:gap-4 px-3 sm:px-5 py-3 max-w-6xl mx-auto w-full">
+      <main className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center justify-center-safe fit-short gap-3 sm:gap-4 px-3 sm:px-5 py-3 max-w-6xl mx-auto w-full">
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 w-full">
           <Step n={1} color="var(--sky)" title="Giơ 1 bàn tay" text="Đưa tay vào trước camera. Máy chỉ nhìn các khớp tay, không hiện hình em.">
             <div className="h-full aspect-square rounded-2xl bg-[var(--sky-soft)] p-2">
@@ -42,11 +42,11 @@ export function Tutorial({ isFullscreen, onBack, onToggleFullscreen, onStart }: 
             </div>
           </Step>
 
-          <Step n={2} color="var(--rock)" title="Hô OẲN, TÙ" text="Nắm tay lại, lắc lên xuống theo nhịp hô.">
+          <Step n={2} color="var(--rock)" title="Lắc tay để hô" text="Nắm tay, lắc xuống. Mỗi lần lắc, máy hô một tiếng: OẲN, TÙ, XÌ.">
             <img src={RPS_CHOICES.rock.image} alt="" className="h-full object-contain anim-wiggle" />
           </Step>
 
-          <Step n={3} color="var(--lose)" title="Đến XÌ: ra tay" text="Ra Búa, Kéo hoặc Bao. Giữ yên tay đến khi hết thanh đỏ.">
+          <Step n={3} color="var(--lose)" title="Đến XÌ: ra tay" text="Lần lắc thứ 3 là XÌ: ra Búa, Kéo hoặc Bao, giữ yên đến khi hết vòng đỏ.">
             <div className="flex items-end gap-1 h-full">
               {ALL_RPS_CHOICES.map((c) => (
                 <img key={c} src={RPS_CHOICES[c].image} alt={RPS_CHOICES[c].label} className="h-[85%] object-contain" />
@@ -63,7 +63,7 @@ export function Tutorial({ isFullscreen, onBack, onToggleFullscreen, onStart }: 
         </div>
 
         <div className="card w-full p-3 flex flex-col items-center gap-2" style={{ ['--c' as string]: 'var(--sun)', ['--cs' as string]: 'var(--sun-dark)' }}>
-          <span className="font-extrabold text-lg sm:text-xl">Nhịp của một lượt</span>
+          <span className="font-extrabold text-lg sm:text-xl">Nhịp của một lượt: em lắc, máy hô</span>
           <div className="flex flex-wrap items-center justify-center gap-1.5 sm:gap-2">
             {BEAT_STRIP.map((b, i) => (
               <div key={b.word} className="flex items-center gap-1.5 sm:gap-2">

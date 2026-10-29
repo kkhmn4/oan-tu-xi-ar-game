@@ -1,8 +1,9 @@
 # ✌️✊✋ Game AR Oẳn Tù Xì · Manabie AI Lab
 
 > **Bản nâng cấp cho máy tính bảng (29/10/2026)**, fork từ `hoang-tuannguyen-manabie/oan-tu-xi-ar-game`:
-> - Giao diện sáng màu cho học sinh nhỏ: nền kem, thẻ trắng viền dày, chữ Baloo 2, bàn tay và Bot 3D.
-> - Mỗi lượt đi theo 4 bước rõ ràng: **Giơ tay, Oẳn tù xì, Chốt tay, Kết quả**. Máy chốt thế tay ở cuối chữ **XÌ** (thanh đỏ chạy hết), lấy thế tay xuất hiện lâu nhất trong khoảng XÌ.
+> - Giao diện sáng màu cho học sinh nhỏ: nền kem, thẻ trắng viền dày, bàn tay và Bot 3D.
+> - Mỗi lượt đi theo 4 bước rõ ràng: **Giơ tay, Lắc tay và hô, Chốt tay, Kết quả**. Máy chỉ hô khi thấy người chơi **lắc tay**: mỗi lần lắc xuống là một tiếng OẲN, TÙ, XÌ; ngừng lắc thì hiện "Lắc tay để tiếp tục". Máy chốt thế tay khi vòng đỏ quanh chữ VS chạy hết, lấy thế tay xuất hiện lâu nhất trong khoảng XÌ.
+> - Một tiêu điểm duy nhất: chữ lệnh to ở trên, tay người chơi đối mặt bài của máy ở giữa, nhịp ở dưới; viền màn hình đỏ lúc XÌ, đổi màu theo kết quả. Chữ Nunito (dấu chồng tiếng Việt rõ ở cỡ lớn).
 > - Không thấy tay lúc chốt thì chơi lại lượt đó (không tự gán Búa). Có thẻ "LƯỢT n" báo lượt mới, màn nghỉ đổi bạn giữa hai vòng.
 > - Không có camera hoặc mất mạng thì chơi bằng 3 nút bấm. Không hiện hình camera, chỉ vẽ khung xương bàn tay.
 > - Logic lượt: `src/utils/engine.ts`. Triển khai Netlify theo `netlify.toml`.

@@ -39,7 +39,7 @@ export function Debrief({ state, profile, onReplay, onOpenSetup, onBackToIntro }
         }
       />
 
-      <main className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center justify-center gap-3 px-3 sm:px-5 py-3 max-w-5xl mx-auto w-full">
+      <main className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center justify-center-safe fit-short gap-3 px-3 sm:px-5 py-3 max-w-5xl mx-auto w-full">
         <div className="card w-full flex flex-wrap items-center justify-center gap-4 sm:gap-8 px-4 py-3 anim-pop" style={{ ['--c' as string]: color, ['--cs' as string]: colorDark }}>
           <div className="flex items-end gap-2">
             <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-3xl bg-[var(--sky-soft)] p-1">

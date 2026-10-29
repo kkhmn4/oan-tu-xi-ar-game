@@ -1,4 +1,4 @@
-import { RefObject, useCallback, useEffect, useRef, useState } from 'react';
+import { ReactNode, RefObject, useCallback, useEffect, useRef, useState } from 'react';
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 import { AIDifficulty } from '../ai';
 import { BRAND_MASCOTS } from '../data/brand';
@@ -254,7 +254,9 @@ export function Game({ profile, difficulty = 'normal', onGameOver, onStateUpdate
   const char = getCharacterById(profile.characterId);
   const s = state;
   const phase = s?.phase ?? 'TURN_INTRO';
-  const mode = s?.inputMode ?? 'camera';
+
+  const resultColor =
+    s?.lastResult === 'win' ? 'var(--win)' : s?.lastResult === 'lose' ? 'var(--lose)' : 'var(--draw)';
 
   return (
     <div ref={containerRef} className="stage relative w-full h-full overflow-hidden select-none">
@@ -274,26 +276,21 @@ export function Game({ profile, difficulty = 'normal', onGameOver, onStateUpdate
       />
 
       {s && (
-        <div className="absolute inset-0 flex flex-col gap-2 sm:gap-3 p-2 sm:p-4">
+        <div className="absolute inset-0 flex flex-col gap-1 sm:gap-2 p-2 sm:p-3">
           <PhaseSteps phase={phase} />
-
-          <div className="flex-1 min-h-0 grid grid-cols-2 sm:grid-cols-[1fr_minmax(230px,0.9fr)_1fr] gap-2 sm:gap-4 items-stretch">
-            <PlayerCard state={s} char={char} name={profile.groupName} previewRef={previewCanvasRef} />
-            <div className="col-span-2 sm:col-span-1 order-first sm:order-none flex flex-col items-center justify-center text-center min-h-0">
-              <CenterStage state={s} onNext={() => engineRef.current?.skipReveal()} />
-            </div>
-            <BotCard state={s} />
-          </div>
-
+          <FocusStage state={s} char={char} onNext={() => engineRef.current?.skipReveal()} />
           <BottomBar
-            mode={mode}
-            phase={phase}
-            liveGesture={s.liveGesture}
+            state={s}
+            previewRef={previewCanvasRef}
             onChoose={(c) => engineRef.current?.chooseByButton(c)}
             onSwitchToButtons={switchToButtons}
           />
         </div>
       )}
+
+      {/* Viền màn hình sáng màu: đỏ nhấp nháy lúc XÌ, màu kết quả lúc lật bài */}
+      {phase === 'SHOW' && <div className="edge-glow edge-pulse" style={{ ['--g' as string]: 'var(--lose)' }} />}
+      {phase === 'REVEAL' && <div key={`edge-${s?.round}-${s?.turn}`} className="edge-glow anim-fade" style={{ ['--g' as string]: resultColor }} />}
 
       {/* Lớp hiệu ứng pháo giấy, vòng sóng */}
       <canvas ref={fxCanvasRef} className="absolute inset-0 w-full h-full pointer-events-none z-30" />
@@ -330,7 +327,7 @@ export function Game({ profile, difficulty = 'normal', onGameOver, onStateUpdate
 // =============================================================================
 const STEPS = [
   { icon: '✋', label: 'Giơ tay' },
-  { icon: '🎵', label: 'Oẳn tù xì' },
+  { icon: '🎵', label: 'Lắc tay, hô' },
   { icon: '🔒', label: 'Chốt tay' },
   { icon: '🏆', label: 'Kết quả' },
 ];
@@ -345,7 +342,7 @@ function stepIndex(phase: GamePhase): number {
 function PhaseSteps({ phase }: { phase: GamePhase }) {
   const cur = stepIndex(phase);
   return (
-    <div className="hidden sm:flex items-center justify-center gap-1.5 shrink-0">
+    <div className="flex items-center justify-center gap-1.5 shrink-0">
       {STEPS.map((st, i) => {
         const done = i < cur;
         const active = i === cur;
@@ -354,16 +351,15 @@ function PhaseSteps({ phase }: { phase: GamePhase }) {
         return (
           <div key={st.label} className="flex items-center gap-1.5">
             <div
-              className={`flex items-center gap-1.5 rounded-full px-3 lg:px-4 py-1 font-extrabold transition-all ${
-                active ? 'text-white text-lg lg:text-xl scale-105' : done ? 'text-white text-base' : 'text-[var(--ink-soft)] text-base border-[3px] border-[var(--line)]'
+              className={`flex items-center gap-1.5 rounded-full px-3 py-0.5 font-extrabold ${
+                active ? 'text-white text-lg' : done ? 'text-white text-sm opacity-80' : 'text-[var(--ink-soft)] text-sm border-[3px] border-[var(--line)] opacity-70'
               }`}
-              style={{ background: bg, boxShadow: active ? '0 4px 0 rgba(0,0,0,.18)' : undefined }}
+              style={{ background: bg }}
             >
-              <span className="w-6 h-6 rounded-full bg-white/25 flex items-center justify-center text-sm">{done ? '✓' : i + 1}</span>
-              <span>{st.icon}</span>
+              <span>{done ? '✓' : st.icon}</span>
               <span>{st.label}</span>
             </div>
-            {i < STEPS.length - 1 && <span className={`text-xl font-extrabold ${i < cur ? 'text-[var(--win)]' : 'text-[var(--line)]'}`}>›</span>}
+            {i < STEPS.length - 1 && <span className="text-lg font-extrabold text-[var(--line)]">›</span>}
           </div>
         );
       })}
@@ -372,116 +368,203 @@ function PhaseSteps({ phase }: { phase: GamePhase }) {
 }
 
 // =============================================================================
-// THẺ NGƯỜI CHƠI
+// VÙNG TIÊU ĐIỂM: MỘT CHỮ LỆNH TO, TAY EM ĐỐI MẶT BÀI CỦA MÁY, NHỊP Ở DƯỚI
 // =============================================================================
-function PlayerCard({
+interface Banner {
+  text: string;
+  sub: string;
+  color: string;
+  pulse?: boolean;
+}
+
+function getBanner(s: GameState): Banner {
+  const camera = s.inputMode === 'camera';
+  switch (s.phase) {
+    case 'WAIT_HAND':
+      return { text: 'GIƠ TAY LÊN!', sub: 'Đưa 1 bàn tay vào trước camera', color: 'var(--sky)' };
+    case 'CHANT': {
+      if (!camera) {
+        return {
+          text: s.chantWord || 'OẲN',
+          sub: 'Bấm chọn Búa, Kéo hoặc Bao ở dưới',
+          color: s.chantWord === 'TÙ' ? 'var(--sky)' : 'var(--rock)',
+        };
+      }
+      const next = s.beat === 0 ? 'OẲN' : s.beat === 1 ? 'TÙ' : 'XÌ';
+      if (s.needShake) {
+        return {
+          text: 'LẮC TAY ĐỂ TIẾP TỤC',
+          sub: s.handVisible ? `Nắm tay, lắc xuống để hô ${next}` : 'Máy chưa thấy tay em',
+          color: 'var(--rock)',
+          pulse: true,
+        };
+      }
+      if (s.beat === 0) return { text: 'LẮC TAY!', sub: 'Nắm tay, lắc xuống 3 lần: OẲN, TÙ, XÌ', color: 'var(--rock)' };
+      if (s.beat === 1) return { text: 'OẲN', sub: 'Lắc tiếp!', color: 'var(--rock)' };
+      return { text: 'TÙ', sub: 'Lắc lần nữa là XÌ, ra tay luôn!', color: 'var(--sky)' };
+    }
+    case 'SHOW':
+      return { text: 'XÌ!', sub: camera ? 'Ra tay và giữ yên!' : 'Bấm chọn ngay!', color: 'var(--lose)' };
+    case 'LOCKED':
+      return { text: 'CHỐT!', sub: 'Máy đã khóa tay em. Lật bài nào!', color: 'var(--ink)' };
+    case 'REVEAL':
+      return {
+        text: s.resultMessage,
+        sub: `${s.resultDetail}${s.lastScoreGain ? `   +${s.lastScoreGain} ⭐` : ''}`,
+        color: s.lastResult === 'win' ? 'var(--win)' : s.lastResult === 'lose' ? 'var(--lose)' : 'var(--draw)',
+      };
+    case 'RETRY':
+      return { text: 'CHƠI LẠI LƯỢT NÀY', sub: s.retryReason, color: 'var(--lose)' };
+    default:
+      return { text: `LƯỢT ${s.turn}`, sub: `Vòng ${s.round}`, color: 'var(--sky)' };
+  }
+}
+
+function FocusStage({
   state: s,
   char,
-  name,
-  previewRef,
+  onNext,
 }: {
   state: GameState;
   char: ReturnType<typeof getCharacterById>;
-  name: string;
-  previewRef: RefObject<HTMLCanvasElement | null>;
+  onNext: () => void;
 }) {
-  const locked = (s.phase === 'LOCKED' || s.phase === 'REVEAL') && s.playerChoice;
-  const camera = s.inputMode === 'camera';
-  const live = s.liveGesture;
-
-  let img = HAND_WAITING_IMAGE;
-  let imgClass = 'anim-bob';
-  let caption = 'Chuẩn bị nhé!';
-  let color = 'var(--sky)';
-
-  if (locked) {
-    img = RPS_CHOICES[s.playerChoice!].image;
-    imgClass = s.phase === 'LOCKED' ? 'anim-pop' : '';
-    caption = RPS_CHOICES[s.playerChoice!].vietnameseName;
-    color = RPS_CHOICES[s.playerChoice!].color;
-  } else if (s.phase === 'WAIT_HAND') {
-    caption = 'Giơ 1 bàn tay lên';
-  } else if (s.phase === 'CHANT') {
-    if (camera || !live) {
-      img = RPS_CHOICES.rock.image;
-      imgClass = 'anim-wiggle';
-      caption = camera ? 'Lắc nắm tay theo nhịp' : 'Bấm chọn tay ở dưới';
-    } else {
-      img = RPS_CHOICES[live].image;
-      imgClass = '';
-      caption = `Em chọn ${RPS_CHOICES[live].label}`;
-      color = RPS_CHOICES[live].color;
-    }
-  } else if (s.phase === 'SHOW') {
-    if (live) {
-      img = RPS_CHOICES[live].image;
-      imgClass = '';
-      caption = RPS_CHOICES[live].vietnameseName;
-      color = RPS_CHOICES[live].color;
-    } else {
-      caption = camera ? 'Ra tay đi em!' : 'Bấm chọn nhanh!';
-    }
-  } else if (s.phase === 'RETRY') {
-    caption = 'Chưa chốt được';
-    color = 'var(--lose)';
-  }
+  const b = getBanner(s);
+  const long = b.text.length > 10;
+  const loseShake = s.phase === 'REVEAL' && s.lastResult === 'lose';
 
   return (
-    <div className="card relative flex flex-col min-h-0 overflow-hidden" style={{ ['--c' as string]: color, ['--cs' as string]: color }}>
-      <div className="flex items-center gap-2 px-3 pt-2 shrink-0">
-        <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-2xl bg-[var(--sky-soft)] p-0.5 shrink-0">
-          <CharacterAvatar character={char} />
-        </div>
-        <div className="flex flex-col min-w-0 leading-tight">
-          <span className="chip text-sm w-max" style={{ ['--c' as string]: 'var(--sky)' }}>BẠN</span>
-          <span className="font-extrabold text-base sm:text-lg truncate">{name}</span>
-        </div>
-      </div>
-
-      <div className="relative flex-1 min-h-0 flex flex-col items-center justify-center px-2">
-        <img
-          key={`${img}-${imgClass}`}
-          src={img}
-          alt={caption}
-          className={`h-[54%] max-h-60 w-auto object-contain drop-shadow-[0_10px_0_rgba(35,51,92,0.12)] ${imgClass}`}
-        />
-        {locked && (
-          <span className="chip text-base sm:text-lg mt-1 anim-stamp" style={{ ['--c' as string]: 'var(--ink)' }}>
-            🔒 ĐÃ CHỐT
-          </span>
-        )}
+    <div
+      key={loseShake ? `shake-${s.round}-${s.turn}` : 'stage'}
+      className={`flex-1 min-h-0 flex flex-col items-center justify-center gap-[1.2vh] ${loseShake ? 'anim-shake-once' : ''}`}
+    >
+      {/* Chữ lệnh: chỗ duy nhất có chữ to */}
+      <div className="flex flex-col items-center text-center shrink-0">
         <span
-          className={`title mt-1 text-center ${caption.length > 9 ? 'text-xl sm:text-2xl lg:text-3xl' : 'text-2xl sm:text-3xl lg:text-4xl'}`}
-          style={{ color }}
+          key={b.text}
+          className={`title outline-text anim-beat ${b.pulse ? 'anim-pulse-text' : ''}`}
+          style={{ color: b.color, fontSize: long ? 'clamp(2.2rem, 7.5vh, 5rem)' : 'clamp(3.2rem, 12vh, 8rem)' }}
         >
-          {caption}
+          {b.text}
         </span>
-        {s.phase === 'SHOW' && (
-          <span className="mt-1 text-lg font-extrabold text-[var(--ink-soft)]">Giữ yên tay nhé!</span>
-        )}
+        <span className="font-extrabold text-[var(--ink)] leading-tight" style={{ fontSize: 'clamp(1.3rem, 3.8vh, 2.2rem)' }}>
+          {b.sub}
+        </span>
       </div>
 
-      {camera && (
-        <div className="absolute right-2 top-2 w-[34%] max-w-40 rounded-2xl overflow-hidden border-[3px] border-[var(--sky)] bg-white">
-          <canvas ref={previewRef} className="block w-full aspect-[4/3]" />
-          <div className="text-center text-xs sm:text-sm font-extrabold py-0.5 bg-[var(--sky)] text-white truncate px-1">
-            {locked
-              ? `🔒 Chốt: ${RPS_CHOICES[s.playerChoice!].label}`
-              : s.handVisible
-              ? `👀 Thấy: ${live ? RPS_CHOICES[live].label : '...'}`
-              : 'Chưa thấy tay'}
+      {/* Tay em và bài của máy đối mặt nhau */}
+      <div className="flex-1 min-h-0 w-full max-w-6xl grid grid-cols-[1fr_auto_1fr] items-center gap-3 sm:gap-6 px-2">
+        <PlayerSlot state={s} char={char} />
+        <CenterBadge state={s} />
+        <BotSlot state={s} />
+      </div>
+
+      <div className="shrink-0 flex flex-col items-center gap-1.5 min-h-[9vh] justify-center">
+        {s.phase === 'REVEAL' ? (
+          <div className="flex items-center gap-3">
+            <div className="w-48 sm:w-64 timebar" style={{ ['--c' as string]: 'var(--sky)' }}>
+              <i style={{ width: `${s.phaseProgress * 100}%` }} />
+            </div>
+            <button type="button" className="btn" onClick={onNext}>
+              {s.turn < s.maxTurnsPerRound ? `Lượt ${s.turn + 1}` : s.round === 1 ? 'Hết vòng 1' : 'Xem tổng kết'} ▶
+            </button>
           </div>
-        </div>
-      )}
+        ) : (
+          <BeatTrack state={s} />
+        )}
+      </div>
     </div>
   );
 }
 
-// =============================================================================
-// THẺ MÁY
-// =============================================================================
-function BotCard({ state: s }: { state: GameState }) {
-  const revealed = s.phase === 'REVEAL' && s.aiChoice;
+function HandStage({ children, ring }: { children: ReactNode; ring?: string }) {
+  return (
+    <div className="relative flex items-center justify-center" style={{ height: 'min(30vh, 270px)', aspectRatio: '1 / 1' }}>
+      <div
+        className="absolute inset-0 rounded-full"
+        style={{ background: '#fff', boxShadow: ring ? `0 0 0 8px ${ring}, 0 10px 0 8px rgba(35,51,92,.12)` : '0 8px 0 rgba(35,51,92,.08)' }}
+      />
+      {children}
+    </div>
+  );
+}
+
+function PlayerSlot({ state: s, char }: { state: GameState; char: ReturnType<typeof getCharacterById> }) {
+  const locked = (s.phase === 'LOCKED' || s.phase === 'REVEAL') && s.playerChoice ? s.playerChoice : null;
+  const camera = s.inputMode === 'camera';
+  const live = s.liveGesture;
+
+  let img = HAND_WAITING_IMAGE;
+  let anim = 'anim-bob';
+  let label = 'BẠN';
+  let color = 'var(--sky)';
+  let ring: string | undefined;
+
+  if (locked) {
+    img = RPS_CHOICES[locked].image;
+    anim = s.phase === 'LOCKED' ? 'anim-pop' : '';
+    label = RPS_CHOICES[locked].vietnameseName;
+    color = RPS_CHOICES[locked].color;
+    ring = color;
+  } else if (s.phase === 'CHANT') {
+    if (!camera && live) {
+      img = RPS_CHOICES[live].image;
+      anim = '';
+      label = RPS_CHOICES[live].vietnameseName;
+      color = RPS_CHOICES[live].color;
+    } else {
+      img = RPS_CHOICES.rock.image;
+      anim = s.needShake ? 'anim-wiggle' : 'anim-drop';
+      label = camera ? `Lắc ${Math.min(s.beat, 3)}/3` : 'BẠN';
+      color = 'var(--rock)';
+    }
+  } else if (s.phase === 'SHOW') {
+    if (live) {
+      img = RPS_CHOICES[live].image;
+      anim = '';
+      label = RPS_CHOICES[live].vietnameseName;
+      color = RPS_CHOICES[live].color;
+      ring = color;
+    } else {
+      label = '?';
+    }
+  } else if (s.phase === 'RETRY') {
+    label = '?';
+    color = 'var(--lose)';
+  }
+
+  const won = s.phase === 'REVEAL' && s.lastResult === 'win';
+  const lost = s.phase === 'REVEAL' && s.lastResult === 'lose';
+
+  return (
+    <div className={`flex flex-col items-center gap-1 min-w-0 ${lost ? 'opacity-55 grayscale' : ''}`}>
+      <div className="flex items-center gap-2">
+        <div className="w-10 h-10 rounded-2xl bg-[var(--sky-soft)] p-0.5 shrink-0">
+          <CharacterAvatar character={char} />
+        </div>
+        <span className="chip text-lg" style={{ ['--c' as string]: 'var(--sky)' }}>BẠN</span>
+      </div>
+      <HandStage ring={won ? 'var(--win)' : ring}>
+        {won && <span className="absolute -top-8 text-5xl anim-pop z-10">👑</span>}
+        <img
+          key={`${img}-${anim}-${s.beat}`}
+          src={img}
+          alt={label}
+          className={`relative h-[80%] w-auto object-contain ${anim}`}
+        />
+        {locked && (
+          <span className="absolute -bottom-2 -right-2 w-16 h-16 rounded-full bg-[var(--ink)] text-white text-3xl flex items-center justify-center anim-stamp shadow-[0_5px_0_rgba(0,0,0,.25)]">
+            🔒
+          </span>
+        )}
+      </HandStage>
+      <span className="title" style={{ color, fontSize: 'clamp(1.8rem, 5.2vh, 3.2rem)' }}>{label}</span>
+    </div>
+  );
+}
+
+function BotSlot({ state: s }: { state: GameState }) {
+  const revealed = s.phase === 'REVEAL' && s.aiChoice ? s.aiChoice : null;
   const face = revealed
     ? s.lastResult === 'win'
       ? BOT_IMAGES.lose
@@ -491,244 +574,150 @@ function BotCard({ state: s }: { state: GameState }) {
     : s.phase === 'CHANT' || s.phase === 'SHOW'
     ? BOT_IMAGES.shuffle
     : BOT_IMAGES.wait;
-  const color = revealed ? RPS_CHOICES[s.aiChoice!].color : 'var(--grape)';
+  const won = s.phase === 'REVEAL' && s.lastResult === 'lose';
+  const lost = s.phase === 'REVEAL' && s.lastResult === 'win';
+  const busy = s.phase === 'CHANT' || s.phase === 'SHOW';
 
   return (
-    <div className="card relative flex flex-col min-h-0 overflow-hidden" style={{ ['--c' as string]: color, ['--cs' as string]: color }}>
-      <div className="flex items-center justify-end gap-2 px-3 pt-2 shrink-0">
-        <div className="flex flex-col items-end leading-tight">
-          <span className="chip text-sm" style={{ ['--c' as string]: 'var(--grape)' }}>MÁY</span>
-          <span className="font-extrabold text-base sm:text-lg">
-            {s.difficulty === 'easy' ? 'Mức dễ' : s.difficulty === 'hard' ? 'Mức khó' : 'Mức vừa'}
-          </span>
-        </div>
-        <img key={face} src={face} alt="" className="w-12 h-14 sm:w-14 sm:h-16 object-contain anim-pop" />
+    <div className={`flex flex-col items-center gap-1 min-w-0 ${lost ? 'opacity-55 grayscale' : ''}`}>
+      <div className="flex items-center gap-2">
+        <span className="chip text-lg" style={{ ['--c' as string]: 'var(--grape)' }}>MÁY</span>
+        <img key={face} src={face} alt="" className="w-10 h-12 object-contain anim-pop" />
       </div>
-
-      <div className="relative flex-1 min-h-0 flex flex-col items-center justify-center px-2">
+      <HandStage ring={won ? 'var(--win)' : revealed ? RPS_CHOICES[revealed].color : undefined}>
+        {won && <span className="absolute -top-8 text-5xl anim-pop z-10">👑</span>}
         {revealed ? (
-          <>
-            <img
-              key={`ai-${s.round}-${s.turn}`}
-              src={RPS_CHOICES[s.aiChoice!].image}
-              alt={RPS_CHOICES[s.aiChoice!].label}
-              className="h-[54%] max-h-60 w-auto object-contain anim-flip -scale-x-100"
-            />
-            <span className="title text-2xl sm:text-3xl lg:text-4xl mt-1" style={{ color }}>
-              {RPS_CHOICES[s.aiChoice!].vietnameseName}
-            </span>
-          </>
+          <img key={`ai-${s.round}-${s.turn}`} src={RPS_CHOICES[revealed].image} alt="" className="relative h-[80%] w-auto object-contain anim-flip -scale-x-100" />
         ) : (
-          <>
-            <div
-              className={`relative h-[54%] max-h-60 aspect-[3/4] rounded-3xl bg-[var(--grape)] flex items-center justify-center shadow-[0_8px_0_var(--grape-dark)] ${
-                s.phase === 'CHANT' || s.phase === 'SHOW' ? 'anim-shake' : ''
-              }`}
-            >
-              <div className="absolute inset-3 rounded-2xl border-4 border-dashed border-white/50" />
-              <span className="title text-white text-7xl sm:text-8xl">?</span>
-            </div>
-            <span className="mt-2 text-lg sm:text-xl font-extrabold text-[var(--grape)] text-center leading-tight">
-              Máy đã chọn xong
-              <br />
-              <span className="text-[var(--ink-soft)] text-base">và úp bài, không nhìn trộm</span>
-            </span>
-          </>
+          <div className={`relative h-[74%] aspect-[3/4] rounded-3xl bg-[var(--grape)] flex items-center justify-center shadow-[0_8px_0_var(--grape-dark)] ${busy ? 'anim-shake' : ''}`}>
+            <div className="absolute inset-3 rounded-2xl border-4 border-dashed border-white/50" />
+            <span className="title text-white" style={{ fontSize: 'min(16vh, 8rem)' }}>?</span>
+          </div>
         )}
-      </div>
+      </HandStage>
+      <span className="title" style={{ color: revealed ? RPS_CHOICES[revealed].color : 'var(--grape)', fontSize: 'clamp(1.8rem, 5.2vh, 3.2rem)' }}>
+        {revealed ? RPS_CHOICES[revealed].vietnameseName : 'ÚP BÀI'}
+      </span>
     </div>
   );
 }
 
-// =============================================================================
-// GIỮA SÂN: NHỊP HÔ, CHỐT, KẾT QUẢ
-// =============================================================================
-const BEATS = ['OẲN', 'TÙ', 'XÌ', 'CHỐT'] as const;
+function CenterBadge({ state: s }: { state: GameState }) {
+  const size = 'min(15vh, 130px)';
+  if (s.phase === 'REVEAL') {
+    const icon = s.lastResult === 'win' ? '🎉' : s.lastResult === 'lose' ? '😮' : '🤝';
+    return (
+      <span className="anim-pop" style={{ fontSize: 'min(13vh, 6.5rem)' }}>
+        {icon}
+      </span>
+    );
+  }
+  return (
+    <div className="relative flex items-center justify-center rounded-full bg-[var(--ink)] text-white shadow-[0_6px_0_rgba(0,0,0,.25)]" style={{ width: size, height: size }}>
+      <span className="title" style={{ fontSize: 'min(6vh, 3rem)' }}>VS</span>
+      {s.phase === 'SHOW' && (
+        <svg className="absolute -inset-3 w-[calc(100%+24px)] h-[calc(100%+24px)] -rotate-90" viewBox="0 0 40 40">
+          <circle cx="20" cy="20" r="18" fill="none" stroke="#f1e7d4" strokeWidth="3" />
+          <circle cx="20" cy="20" r="18" fill="none" stroke="var(--lose)" strokeWidth="3" strokeLinecap="round"
+            strokeDasharray={113} strokeDashoffset={113 * s.phaseProgress} />
+        </svg>
+      )}
+    </div>
+  );
+}
+
+const BEATS = ['OẲN', 'TÙ', 'XÌ', '🔒'] as const;
 
 function BeatTrack({ state: s }: { state: GameState }) {
   const idx =
-    s.phase === 'CHANT' ? (s.chantWord === 'OẲN' ? 0 : 1) : s.phase === 'SHOW' ? 2 : s.phase === 'LOCKED' || s.phase === 'REVEAL' ? 3 : -1;
+    s.phase === 'CHANT' ? s.beat - 1 : s.phase === 'SHOW' ? 2 : s.phase === 'LOCKED' ? 3 : -1;
   const colors = ['var(--rock)', 'var(--sky)', 'var(--lose)', 'var(--ink)'];
   return (
-    <div className="flex items-center justify-center gap-1 sm:gap-1.5">
+    <div className="flex items-center justify-center gap-2">
       {BEATS.map((b, i) => (
-        <div key={b} className="flex items-center gap-1 sm:gap-1.5">
+        <div key={b} className="flex items-center gap-2">
           <div
-            className={`relative rounded-full flex items-center justify-center font-extrabold text-white transition-all ${
-              i === idx ? 'w-14 h-14 sm:w-16 sm:h-16 text-base sm:text-lg' : 'w-11 h-11 sm:w-12 sm:h-12 text-xs sm:text-sm'
-            }`}
-            style={{ background: i <= idx ? colors[i] : '#e9dfcc', boxShadow: i === idx ? '0 4px 0 rgba(0,0,0,.2)' : undefined }}
+            className={`rounded-full flex items-center justify-center font-extrabold text-white transition-all ${i === idx ? 'anim-pop' : ''}`}
+            style={{
+              width: i === idx ? 'min(9vh, 76px)' : 'min(6.5vh, 54px)',
+              height: i === idx ? 'min(9vh, 76px)' : 'min(6.5vh, 54px)',
+              fontSize: i === idx ? 'min(3.2vh, 1.6rem)' : 'min(2.3vh, 1.1rem)',
+              background: i <= idx ? colors[i] : '#e9dfcc',
+              boxShadow: i === idx ? '0 5px 0 rgba(0,0,0,.2)' : undefined,
+            }}
           >
-            {i === 3 ? '🔒' : b}
-            {i === 2 && s.phase === 'SHOW' && (
-              <svg className="absolute -inset-1.5 w-[calc(100%+12px)] h-[calc(100%+12px)] -rotate-90" viewBox="0 0 40 40">
-                <circle cx="20" cy="20" r="18" fill="none" stroke="var(--lose)" strokeWidth="3" strokeLinecap="round"
-                  strokeDasharray={113} strokeDashoffset={113 * s.phaseProgress} />
-              </svg>
-            )}
+            {b}
           </div>
-          {i < 3 && <span className="w-3 sm:w-5 h-1.5 rounded-full" style={{ background: i < idx ? colors[i + 1] : '#e9dfcc' }} />}
+          {i < 3 && <span className="w-6 h-2 rounded-full" style={{ background: i < idx ? colors[i + 1] : '#e9dfcc' }} />}
         </div>
       ))}
     </div>
   );
 }
 
-function CenterStage({ state: s, onNext }: { state: GameState; onNext: () => void }) {
-  const big = 'title outline-text text-[clamp(3.6rem,9vw,8rem)]';
-
-  if (s.phase === 'WAIT_HAND') {
-    return (
-      <div className="flex flex-col items-center gap-2 anim-fade">
-        <span className="text-[clamp(3rem,7vw,6rem)] anim-bob">✋</span>
-        <span className="title text-[clamp(1.8rem,3.4vw,3rem)] text-[var(--sky)]">Giơ tay lên nào!</span>
-        <span className="text-lg sm:text-xl text-[var(--ink-soft)] max-w-xs">Đưa 1 bàn tay vào trước camera, cách khoảng 1 gang tay đến 1 cánh tay.</span>
-      </div>
-    );
-  }
-
-  if (s.phase === 'CHANT' || s.phase === 'SHOW') {
-    const word = s.chantWord === 'XÌ' ? 'XÌ!' : s.chantWord;
-    const color = s.chantWord === 'OẲN' ? 'var(--rock)' : s.chantWord === 'TÙ' ? 'var(--sky)' : 'var(--lose)';
-    return (
-      <div className="flex flex-col items-center gap-2 sm:gap-3">
-        <span key={word} className={`${big} anim-beat`} style={{ color }}>
-          {word}
-        </span>
-        <span className="text-xl sm:text-2xl font-extrabold text-[var(--ink)]">
-          {s.phase === 'SHOW' ? (s.inputMode === 'camera' ? 'Ra tay và giữ yên!' : 'Bấm chọn ngay!') : 'Cùng hô theo nhịp'}
-        </span>
-        <BeatTrack state={s} />
-        {s.phase === 'SHOW' && (
-          <div className="w-48 sm:w-60">
-            <div className="timebar" style={{ ['--c' as string]: 'var(--lose)' }}>
-              <i style={{ width: `${(1 - s.phaseProgress) * 100}%` }} />
-            </div>
-            <span className="text-sm font-bold text-[var(--ink-soft)]">Hết thanh đỏ là máy chốt</span>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  if (s.phase === 'LOCKED') {
-    return (
-      <div className="flex flex-col items-center gap-3">
-        <span className={`${big} anim-stamp text-[var(--ink)]`}>CHỐT!</span>
-        <span className="text-xl sm:text-2xl font-extrabold">Máy đã khóa tay của em 🔒</span>
-        <BeatTrack state={s} />
-        <span className="text-lg font-bold text-[var(--grape)]">Chuẩn bị lật bài của máy...</span>
-      </div>
-    );
-  }
-
-  if (s.phase === 'REVEAL') {
-    const c = s.lastResult === 'win' ? 'var(--win)' : s.lastResult === 'lose' ? 'var(--lose)' : 'var(--draw)';
-    const icon = s.lastResult === 'win' ? '🎉' : s.lastResult === 'lose' ? '🤖' : '🤝';
-    const nextLabel = s.turn < s.maxTurnsPerRound ? `Lượt ${s.turn + 1}` : s.round === 1 ? 'Hết vòng 1' : 'Xem tổng kết';
-    return (
-      <div className="flex flex-col items-center gap-2 sm:gap-3 w-full max-w-sm">
-        <span className="text-5xl sm:text-6xl anim-pop">{icon}</span>
-        <span className="chip title text-[clamp(1.8rem,3.6vw,3.2rem)] px-6 py-1 anim-pop" style={{ ['--c' as string]: c, boxShadow: '0 6px 0 rgba(0,0,0,.18)' }}>
-          {s.resultMessage}
-        </span>
-        <span className="title text-[clamp(1.5rem,2.6vw,2.4rem)] anim-slide-up">{s.resultDetail}</span>
-        <span className="text-xl font-extrabold anim-slide-up" style={{ color: s.lastScoreGain ? 'var(--win)' : 'var(--ink-soft)' }}>
-          {s.lastScoreGain ? `+${s.lastScoreGain} điểm ⭐` : 'Không có điểm'}
-        </span>
-        <div className="w-full px-4">
-          <div className="timebar" style={{ ['--c' as string]: 'var(--sky)' }}>
-            <i style={{ width: `${s.phaseProgress * 100}%` }} />
-          </div>
-        </div>
-        <button type="button" className="btn btn-sm" onClick={onNext}>
-          {nextLabel} ▶
-        </button>
-      </div>
-    );
-  }
-
-  if (s.phase === 'RETRY') {
-    return (
-      <div className="flex flex-col items-center gap-2 anim-pop">
-        <span className="text-6xl">🙈</span>
-        <span className="title text-[clamp(1.8rem,3.4vw,3rem)] text-[var(--lose)]">Chơi lại lượt này</span>
-        <span className="text-xl font-bold max-w-xs">{s.retryReason}</span>
-        <span className="text-lg text-[var(--ink-soft)] max-w-xs">Lần này nhớ ra tay đúng lúc <b>XÌ</b> và giữ yên nhé!</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex flex-col items-center gap-1">
-      <span className="text-xl font-extrabold text-[var(--ink-soft)]">Vòng {s.round}</span>
-      <span className="title text-[clamp(3rem,7vw,6rem)] text-[var(--sky)]">Lượt {s.turn}</span>
-    </div>
-  );
-}
-
 // =============================================================================
-// THANH DƯỚI: LUẬT CHƠI HOẶC NÚT BẤM
+// THANH DƯỚI: Ô CAMERA NHỎ, LUẬT CHƠI, HOẶC NÚT BẤM
 // =============================================================================
 function BottomBar({
-  mode,
-  phase,
-  liveGesture,
+  state: s,
+  previewRef,
   onChoose,
   onSwitchToButtons,
 }: {
-  mode: InputMode;
-  phase: GamePhase;
-  liveGesture: RPSChoice | null;
+  state: GameState;
+  previewRef: RefObject<HTMLCanvasElement | null>;
   onChoose: (c: RPSChoice) => void;
   onSwitchToButtons: () => void;
 }) {
-  if (mode === 'buttons') {
-    const open = phase === 'CHANT' || phase === 'SHOW';
+  if (s.inputMode === 'buttons') {
+    const open = s.phase === 'CHANT' || s.phase === 'SHOW';
     return (
-      <div className="shrink-0 flex flex-col items-center gap-1">
-        <span className="text-base sm:text-lg font-extrabold text-[var(--ink-soft)]">
-          {open ? 'Bấm chọn trước khi máy CHỐT' : 'Nút sẽ mở khi bắt đầu hô'}
-        </span>
-        <div className="flex items-center justify-center gap-2 sm:gap-4">
-          {ALL_RPS_CHOICES.map((c) => {
-            const d = RPS_CHOICES[c];
-            const picked = liveGesture === c && open;
-            return (
-              <button
-                key={c}
-                type="button"
-                disabled={!open}
-                onClick={() => onChoose(c)}
-                className={`btn min-h-0 py-1 px-4 sm:px-6 ${picked ? 'ring-4 ring-[var(--ink)] scale-105' : ''} ${open ? '' : 'opacity-50 cursor-not-allowed'}`}
-                style={{ ['--c' as string]: d.color, ['--cs' as string]: 'rgba(0,0,0,.25)' }}
-              >
-                <img src={d.image} alt="" className="w-10 h-10 sm:w-14 sm:h-14 object-contain" />
-                <span className="text-xl sm:text-2xl">{d.vietnameseName}</span>
-              </button>
-            );
-          })}
-        </div>
+      <div className="shrink-0 flex items-center justify-center gap-3 sm:gap-5">
+        {ALL_RPS_CHOICES.map((c) => {
+          const d = RPS_CHOICES[c];
+          const picked = s.liveGesture === c && open;
+          return (
+            <button
+              key={c}
+              type="button"
+              disabled={!open}
+              onClick={() => onChoose(c)}
+              className={`btn min-h-0 py-1 px-5 sm:px-7 ${picked ? 'ring-4 ring-[var(--ink)] scale-105' : ''} ${open ? '' : 'opacity-40 cursor-not-allowed'}`}
+              style={{ ['--c' as string]: d.color, ['--cs' as string]: 'rgba(0,0,0,.25)' }}
+            >
+              <img src={d.image} alt="" className="w-12 h-12 sm:w-14 sm:h-14 object-contain" />
+              <span className="text-2xl">{d.vietnameseName}</span>
+            </button>
+          );
+        })}
       </div>
     );
   }
 
+  const locked = (s.phase === 'LOCKED' || s.phase === 'REVEAL') && s.playerChoice;
   return (
-    <div className="shrink-0 flex flex-wrap items-center justify-center gap-2 sm:gap-3">
-      {ALL_RPS_CHOICES.map((c) => {
-        const d = RPS_CHOICES[c];
-        const loser = RPS_CHOICES[d.beats];
-        return (
-          <div key={c} className="flex items-center gap-1 bg-white rounded-full pl-1 pr-3 py-0.5 border-[3px]" style={{ borderColor: d.color }}>
-            <img src={d.image} alt="" className="w-8 h-8 object-contain" />
-            <span className="font-extrabold text-base sm:text-lg" style={{ color: d.color }}>{d.label}</span>
-            <span className="font-bold text-base sm:text-lg text-[var(--ink-soft)]">{d.verb}</span>
-            <img src={loser.image} alt="" className="w-7 h-7 object-contain" />
-            <span className="font-extrabold text-base sm:text-lg" style={{ color: loser.color }}>{loser.label}</span>
-          </div>
-        );
-      })}
-      <button type="button" className="btn btn-white btn-sm" onClick={onSwitchToButtons}>
+    <div className="shrink-0 flex items-center justify-end md:justify-center gap-3 relative min-h-[44px]">
+      <div className="absolute left-0 bottom-0 w-32 rounded-2xl overflow-hidden border-[3px] border-[var(--sky)] bg-white z-10">
+        <canvas ref={previewRef} className="block w-full aspect-[4/3]" />
+        <div className="text-center text-sm font-extrabold py-0.5 bg-[var(--sky)] text-white truncate px-1">
+          {locked ? '🔒 Đã chốt' : s.handVisible ? '📷 Thấy tay' : '📷 Chưa thấy tay'}
+        </div>
+      </div>
+      <div className="hidden md:flex flex-wrap items-center justify-center gap-2 opacity-80">
+        {ALL_RPS_CHOICES.map((c) => {
+          const d = RPS_CHOICES[c];
+          const l = RPS_CHOICES[d.beats];
+          return (
+            <span key={c} className="flex items-center gap-1 bg-white rounded-full pl-1 pr-3 py-0.5 border-[3px] text-base font-extrabold" style={{ borderColor: d.color }}>
+              <img src={d.image} alt="" className="w-7 h-7 object-contain" />
+              <span style={{ color: d.color }}>{d.label}</span>
+              <span className="text-[var(--ink-soft)] font-bold">{d.verb}</span>
+              <span style={{ color: l.color }}>{l.label}</span>
+            </span>
+          );
+        })}
+      </div>
+      <button type="button" className="btn btn-white btn-sm shrink-0 md:absolute md:right-0 md:bottom-0" onClick={onSwitchToButtons}>
         🖱️ Chơi bằng nút
       </button>
     </div>
@@ -740,26 +729,22 @@ function BottomBar({
 // =============================================================================
 function TurnIntroOverlay({ state: s }: { state: GameState }) {
   return (
-    <div className="absolute inset-0 z-40 flex items-center justify-center bg-[var(--cream)]/80 anim-fade pointer-events-none">
+    <div className="absolute inset-0 z-40 flex items-center justify-center bg-[var(--cream)]/85 anim-fade pointer-events-none">
       <div
         key={`${s.round}-${s.turn}`}
         className="card anim-pop flex flex-col items-center gap-2 px-10 sm:px-16 py-5 sm:py-7"
         style={{ ['--c' as string]: 'var(--sky)', ['--cs' as string]: 'var(--sky-dark)' }}
       >
-        <span className="chip text-lg sm:text-xl" style={{ ['--c' as string]: s.round === 1 ? 'var(--sky)' : 'var(--grape)' }}>
-          VÒNG {s.round} {s.round === 1 ? '· Bạn thứ nhất' : '· Bạn thứ hai'}
+        <span className="chip text-xl" style={{ ['--c' as string]: s.round === 1 ? 'var(--sky)' : 'var(--grape)' }}>
+          VÒNG {s.round}: {s.round === 1 ? 'bạn thứ nhất' : 'bạn thứ hai'}
         </span>
-        <span className="title text-[clamp(4rem,10vw,8rem)] text-[var(--sky)]">LƯỢT {s.turn}</span>
+        <span className="title text-[var(--sky)]" style={{ fontSize: 'clamp(4rem, 16vh, 9rem)' }}>LƯỢT {s.turn}</span>
         <div className="flex gap-2">
           {[1, 2, 3, 4, 5].map((t) => (
-            <span
-              key={t}
-              className="w-5 h-5 rounded-full"
-              style={{ background: t < s.turn ? 'var(--win)' : t === s.turn ? 'var(--sky)' : '#e9dfcc' }}
-            />
+            <span key={t} className="w-5 h-5 rounded-full" style={{ background: t < s.turn ? 'var(--win)' : t === s.turn ? 'var(--sky)' : '#e9dfcc' }} />
           ))}
         </div>
-        <span className="text-xl sm:text-2xl font-extrabold text-[var(--ink-soft)]">Còn {s.maxTurnsPerRound - s.turn + 1} lượt trong vòng này</span>
+        <span className="text-2xl font-extrabold text-[var(--ink-soft)]">Còn {s.maxTurnsPerRound - s.turn + 1} lượt trong vòng này</span>
       </div>
     </div>
   );
@@ -770,13 +755,13 @@ function RoundGapOverlay({ state: s, onStart }: { state: GameState; onStart: () 
     <div className="absolute inset-0 z-40 flex items-center justify-center bg-[var(--cream)]/90 p-4 anim-fade">
       <div className="card anim-pop flex flex-col items-center gap-3 px-6 sm:px-12 py-6 max-w-xl w-full text-center" style={{ ['--c' as string]: 'var(--grape)', ['--cs' as string]: 'var(--grape-dark)' }}>
         <span className="text-5xl">🔄</span>
-        <span className="title text-[clamp(2.4rem,5vw,4rem)] text-[var(--grape)]">HẾT VÒNG 1!</span>
-        <div className="flex gap-3 text-lg sm:text-xl font-extrabold">
+        <span className="title text-[var(--grape)]" style={{ fontSize: 'clamp(2.6rem, 9vh, 4.4rem)' }}>HẾT VÒNG 1!</span>
+        <div className="flex gap-3 text-xl font-extrabold">
           <span className="chip" style={{ ['--c' as string]: 'var(--win)' }}>Thắng {s.round1Wins}</span>
           <span className="chip" style={{ ['--c' as string]: 'var(--draw)' }}>Hòa {s.round1Draws}</span>
           <span className="chip" style={{ ['--c' as string]: 'var(--lose)' }}>Thua {s.round1Losses}</span>
         </div>
-        <span className="text-xl sm:text-2xl font-extrabold">
+        <span className="text-2xl font-extrabold">
           {s.inputMode === 'camera' ? 'Đổi chỗ! Mời bạn thứ hai giơ tay trước camera.' : 'Đổi chỗ! Mời bạn thứ hai vào bấm chọn.'}
         </span>
         <button type="button" className="btn btn-grape text-2xl px-8 min-h-[64px]" onClick={onStart}>
