@@ -6,7 +6,8 @@
 > - Một tiêu điểm duy nhất: chữ lệnh to ở trên, tay người chơi đối mặt bài của máy ở giữa, nhịp ở dưới; viền màn hình đỏ lúc XÌ, đổi màu theo kết quả. Chữ Nunito (dấu chồng tiếng Việt rõ ở cỡ lớn).
 > - Không thấy tay lúc chốt thì chơi lại lượt đó (không tự gán Búa). Có thẻ "LƯỢT n" báo lượt mới, màn nghỉ đổi bạn giữa hai vòng.
 > - Không có camera hoặc mất mạng thì chơi bằng 3 nút bấm. Không hiện hình camera, chỉ vẽ khung xương bàn tay.
-> - Logic lượt: `src/utils/engine.ts`. Triển khai Netlify theo `netlify.toml`.
+> - **Tối ưu máy tính bảng RAM 4 GB:** nhận diện tay chạy trong Web Worker (`public/mediapipe/hand-worker.js`), giao diện không khựng; lúc nạp sẵn ở trang đầu, worker chạy thử để chọn GPU hay CPU; khung camera thu nhỏ còn 320 px (256 px ở chế độ nhẹ) trước khi nhận diện, chỉ nhận diện ở các pha cần tay; thư viện và mô hình tự phục vụ ở `public/mediapipe/` (đúng phiên bản, trình duyệt giữ 30 ngày); giao diện React chỉ vẽ lại khi trạng thái hiển thị đổi; máy có RAM ≤ 4 GB hoặc ≤ 4 nhân CPU tự bật chế độ nhẹ (ép bằng `?lite=1` hoặc `?lite=0`). Đo với CPU chậm 4 lần: từ 1,3 lên khoảng 50 khung/giây.
+> - Logic lượt: `src/utils/engine.ts`. Triển khai Netlify theo `netlify.toml`. `npm run dev` và `npm run build` tự chép thư viện MediaPipe từ `node_modules` vào `public/mediapipe/`.
 >
 > Phần dưới là mô tả của bản gốc.
 

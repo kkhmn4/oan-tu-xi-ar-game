@@ -1,22 +1,19 @@
 import { ReactNode, RefObject, useCallback, useEffect, useRef, useState } from 'react';
-import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 import { AIDifficulty } from '../ai';
 import { BRAND_MASCOTS } from '../data/brand';
 import { PlayerProfile } from '../data/characters';
 import { ALL_RPS_CHOICES, BOT_IMAGES, HAND_WAITING_IMAGE, RPSChoice, RPS_CHOICES } from '../data/rps';
 import { audio } from '../utils/audio';
+import { LITE } from '../utils/device';
 import { GameEngine, GamePhase, GameState, InputMode } from '../utils/engine';
-import { LandmarkPoint } from '../utils/gesture';
+import { handStats, preloadHandTracker, pushFrame, setHandListener } from '../vision/handTracker';
 import { CharacterAvatar, getCharacterById } from './PlayerSetupModal';
 
-const MAX_CANVAS_PIXEL_RATIO = 1.5;
+const MAX_CANVAS_PIXEL_RATIO = LITE ? 1 : 1.5;
 const MAX_FRAME_DELTA_MS = 50;
-const HAND_DETECT_INTERVAL_MS = 33; // ~30 lần/giây là đủ, đỡ nóng máy tính bảng
-const UI_PUBLISH_INTERVAL_MS = 50;
-
-const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm';
-const MODEL_URL =
-  'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+const PROGRESS_STEPS = 24; // thanh thời gian chỉ cần cập nhật ~24 nấc mỗi pha, không cần mỗi khung hình
+// Chỉ nhận diện tay ở các pha cần tay; lúc chốt, lật bài, nghỉ thì worker được nghỉ
+const NEEDS_HAND: GamePhase[] = ['TURN_INTRO', 'WAIT_HAND', 'CHANT', 'SHOW'];
 
 interface GameProps {
   profile: PlayerProfile;
@@ -25,18 +22,38 @@ interface GameProps {
   onStateUpdate: (state: GameState) => void;
 }
 
+/** Khóa dùng để quyết định có cần vẽ lại giao diện React hay không. */
+function uiKey(s: GameState): string {
+  const timed = s.phase === 'SHOW' || s.phase === 'REVEAL' || s.phase === 'ROUND_GAP';
+  return [
+    s.phase,
+    s.chantWord,
+    s.beat,
+    s.needShake,
+    s.liveGesture,
+    s.handVisible,
+    s.playerChoice,
+    s.aiChoice,
+    s.inputMode,
+    s.history.length,
+    timed ? Math.floor(s.phaseProgress * PROGRESS_STEPS) : 0,
+    s.phase === 'ROUND_GAP' ? Math.ceil(s.phaseRemaining) : 0,
+  ].join('|');
+}
+
+/** Khóa cho thanh trên cùng (App): chỉ đổi khi điểm, lượt hoặc pha đổi. */
+function hudKey(s: GameState): string {
+  return [s.phase, s.score, s.streak, s.round, s.turn, s.history.length].join('|');
+}
+
 export function Game({ profile, difficulty = 'normal', onGameOver, onStateUpdate }: GameProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const fxCanvasRef = useRef<HTMLCanvasElement>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const landmarkerRef = useRef<HandLandmarker | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const engineRef = useRef<GameEngine | null>(null);
   const rafRef = useRef(0);
-  const lastVideoTimeRef = useRef(-1);
-  const lastDetectRef = useRef(0);
-  const isProcessingRef = useRef(false); // cờ chống chồng khung nhận diện
   const finishedRef = useRef(false);
   const onGameOverRef = useRef(onGameOver);
   const onStateUpdateRef = useRef(onStateUpdate);
@@ -54,6 +71,7 @@ export function Game({ profile, difficulty = 'normal', onGameOver, onStateUpdate
   }, [cameraError]);
 
   const stopCamera = useCallback(() => {
+    setHandListener(null);
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     const video = videoRef.current;
@@ -61,49 +79,16 @@ export function Game({ profile, difficulty = 'normal', onGameOver, onStateUpdate
       video.srcObject = null;
       video.pause();
     }
-    try {
-      landmarkerRef.current?.close();
-    } catch {
-      // bỏ qua
-    }
-    landmarkerRef.current = null;
   }, []);
 
   // ---------------------------------------------------------------------------
-  // Vòng lặp khung hình: nhận diện tay, cập nhật engine, vẽ hiệu ứng
+  // Vòng lặp khung hình: gửi khung cho worker, cập nhật engine, vẽ hiệu ứng
   // ---------------------------------------------------------------------------
   const runLoop = useCallback(() => {
     let last = performance.now();
-    let lastPublish = -Infinity;
-    let lastPhase: GamePhase | null = null;
-    let lastWord = '';
-
-    const detect = (engine: GameEngine) => {
-      const video = videoRef.current;
-      const lm = landmarkerRef.current;
-      if (!video || !lm || video.readyState < 2) return;
-      const now = performance.now();
-      if (isProcessingRef.current) return;
-      if (now - lastDetectRef.current < HAND_DETECT_INTERVAL_MS || video.currentTime === lastVideoTimeRef.current) return;
-      lastDetectRef.current = now;
-      isProcessingRef.current = true;
-      lastVideoTimeRef.current = video.currentTime;
-      let hand: LandmarkPoint[] | null = null;
-      try {
-        const res = lm.detectForVideo(video, now);
-        const first = res?.landmarks?.[0];
-        if (first) {
-          const vw = video.videoWidth || 640;
-          const vh = video.videoHeight || 480;
-          hand = first.map((p) => ({ x: (1 - p.x) * vw, y: p.y * vh, z: p.z }));
-        }
-      } catch {
-        return;
-      } finally {
-        isProcessingRef.current = false;
-      }
-      engine.updateHand(hand, video.videoWidth || 640, video.videoHeight || 480);
-    };
+    let lastUi = '';
+    let lastHud = '';
+    let fxWasEmpty = false;
 
     const frame = (t: number) => {
       if (finishedRef.current) return;
@@ -115,7 +100,8 @@ export function Game({ profile, difficulty = 'normal', onGameOver, onStateUpdate
       const dt = Math.max(0, Math.min(MAX_FRAME_DELTA_MS, t - last));
       last = t;
 
-      if (engine.getState().inputMode === 'camera') detect(engine);
+      const live = engine.peek();
+      if (live.inputMode === 'camera' && NEEDS_HAND.includes(live.phase) && videoRef.current) pushFrame(videoRef.current);
       engine.update(dt);
 
       const w = Math.max(1, box.clientWidth);
@@ -125,17 +111,24 @@ export function Game({ profile, difficulty = 'normal', onGameOver, onStateUpdate
         canvas.width = Math.floor(w * pr);
         canvas.height = Math.floor(h * pr);
         engine.resize(w, h);
+        fxWasEmpty = false;
       }
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.setTransform(pr, 0, 0, pr, 0, 0);
-        engine.draw(ctx);
+      // Không có pháo giấy, vòng sóng thì khỏi xóa và vẽ lại cả màn hình
+      const fxEmpty = !engine.hasVFX();
+      if (!(fxEmpty && fxWasEmpty)) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.setTransform(pr, 0, 0, pr, 0, 0);
+          engine.draw(ctx);
+        }
       }
+      fxWasEmpty = fxEmpty;
 
+      // Ô camera nhỏ: chỉ vẽ lại khi có dữ liệu tay mới
       const pv = previewCanvasRef.current;
-      if (pv) {
+      if (pv && engine.takePreviewDirty()) {
         const pw = pv.clientWidth;
         const ph = pv.clientHeight;
         if (pw > 0 && (pv.width !== Math.floor(pw * pr) || pv.height !== Math.floor(ph * pr))) {
@@ -149,18 +142,22 @@ export function Game({ profile, difficulty = 'normal', onGameOver, onStateUpdate
         }
       }
 
-      const s = engine.getState();
-      if (s.phase !== lastPhase || s.chantWord !== lastWord || t - lastPublish >= UI_PUBLISH_INTERVAL_MS) {
-        lastPhase = s.phase;
-        lastWord = s.chantWord;
-        lastPublish = t;
-        setState(s);
-        onStateUpdateRef.current(s);
+      const cur = engine.peek();
+      const ui = uiKey(cur);
+      if (ui !== lastUi) {
+        lastUi = ui;
+        const snap = engine.getState();
+        setState(snap);
+        const hud = hudKey(snap);
+        if (hud !== lastHud) {
+          lastHud = hud;
+          onStateUpdateRef.current(snap);
+        }
       }
-      if (s.isGameOver && !finishedRef.current) {
+      if (cur.isGameOver && !finishedRef.current) {
         finishedRef.current = true;
         stopCamera();
-        onGameOverRef.current(s);
+        onGameOverRef.current(engine.getState());
         return;
       }
       rafRef.current = requestAnimationFrame(frame);
@@ -184,51 +181,41 @@ export function Game({ profile, difficulty = 'normal', onGameOver, onStateUpdate
     else startEngine('buttons');
   }, [startEngine, stopCamera]);
 
-  // Mở camera và nạp mô hình nhận diện tay
+  // Mở camera và chờ worker nhận diện tay sẵn sàng (thường đã nạp sẵn từ trang đầu)
   useEffect(() => {
     let active = true;
     finishedRef.current = false;
     audio.init();
 
+    const openCamera = async () => {
+      try {
+        return await navigator.mediaDevices.getUserMedia({
+          // 480x360 đủ cho nhận diện tay, nhẹ hơn 640x480 cho máy yếu
+          video: { facingMode: 'user', width: { ideal: 480 }, height: { ideal: 360 }, frameRate: { ideal: 24, max: 30 } },
+          audio: false,
+        });
+      } catch {
+        return navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+      }
+    };
+
     const init = async () => {
       try {
-        const vision = await FilesetResolver.forVisionTasks(WASM_URL);
-        if (!active) return;
-        const opts = (delegate: 'GPU' | 'CPU') => ({
-          baseOptions: { modelAssetPath: MODEL_URL, delegate },
-          runningMode: 'VIDEO' as const,
-          numHands: 1,
-          minHandDetectionConfidence: 0.5,
-          minHandPresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5,
-        });
-        let lm: HandLandmarker;
-        try {
-          lm = await HandLandmarker.createFromOptions(vision, opts('GPU'));
-        } catch {
-          lm = await HandLandmarker.createFromOptions(vision, opts('CPU'));
-        }
-        if (!active || engineRef.current) {
-          lm.close();
-          return;
-        }
-        landmarkerRef.current = lm;
-
-        let stream: MediaStream;
-        try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } },
-            audio: false,
-          });
-        } catch {
-          stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
-        }
+        const [stream] = await Promise.all([openCamera(), preloadHandTracker()]);
         if (!active || engineRef.current) {
           stream.getTracks().forEach((t) => t.stop());
           return;
         }
         streamRef.current = stream;
         const video = videoRef.current!;
+        setHandListener((pts) => {
+          const engine = engineRef.current;
+          if (!engine || !video.videoWidth) return;
+          const vw = video.videoWidth;
+          const vh = video.videoHeight;
+          // Lật gương cho giống soi gương, đổi sang tọa độ điểm ảnh của khung video
+          engine.updateHand(pts ? pts.map((p) => ({ x: (1 - p.x) * vw, y: p.y * vh, z: p.z })) : null, vw, vh);
+        });
         video.srcObject = stream;
         video.onloadedmetadata = () => {
           if (!active) return;
@@ -236,13 +223,16 @@ export function Game({ profile, difficulty = 'normal', onGameOver, onStateUpdate
           startEngine('camera');
         };
       } catch (err) {
-        console.warn('Không mở được camera, chuyển sang nút bấm:', err);
+        console.warn('Không mở được camera hoặc mô hình, chuyển sang nút bấm:', err);
         if (!active) return;
         setCameraError('Không mở được camera. Em chơi bằng nút bấm nhé!');
         switchToButtons();
       }
     };
     init();
+
+    // Số đo nhận diện tay (GPU hay CPU, mấy ms mỗi lần) để kiểm hiệu năng
+    (window as any).__oanPerf = handStats;
 
     return () => {
       active = false;
@@ -309,8 +299,9 @@ export function Game({ profile, difficulty = 'normal', onGameOver, onStateUpdate
 
       {loading && (
         <div className="absolute inset-0 z-50 stage flex flex-col items-center justify-center gap-3 p-6 text-center">
-          <img className="w-32 h-32 object-contain anim-bob" src={BRAND_MASCOTS.cameraLoadingAnimated} alt="" />
+          <img className="w-32 h-32 object-contain anim-bob" src={BRAND_MASCOTS.explore} alt="" />
           <p className="title text-3xl sm:text-4xl">Đang mở camera...</p>
+          <p className="text-lg font-bold text-[var(--sky)]">Máy đang chuẩn bị mắt nhìn bàn tay</p>
           <p className="text-lg text-[var(--ink-soft)] max-w-md">Nếu trình duyệt hỏi, em bấm <b>Cho phép</b> để máy nhìn thấy bàn tay.</p>
           <div className="w-12 h-12 rounded-full border-[6px] border-[var(--sky)] border-t-transparent animate-spin" />
           <button type="button" className="btn btn-white btn-sm mt-2" onClick={switchToButtons}>

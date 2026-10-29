@@ -16,6 +16,7 @@ import {
 import { audio } from './utils/audio';
 import { createInitialState, GameState } from './utils/engine';
 import { isFullscreen, toggleFullscreen } from './utils/fullscreen';
+import { preloadHandTracker } from './vision/handTracker';
 
 type Screen = 'intro' | 'tutorial' | 'playing' | 'debrief';
 
@@ -38,6 +39,12 @@ export default function App() {
   const [finalState, setFinalState] = useState<GameState>(() => createInitialState());
   const [runKey, setRunKey] = useState(0);
   const [fullscreenActive, setFullscreenActive] = useState(false);
+
+  // Nạp sẵn mô hình nhận diện tay ngay khi mở trang, để lúc bấm "Chơi ngay" không phải chờ
+  useEffect(() => {
+    const t = window.setTimeout(() => preloadHandTracker().catch(() => undefined), 800);
+    return () => window.clearTimeout(t);
+  }, []);
 
   useEffect(() => {
     const onFs = () => setFullscreenActive(isFullscreen());

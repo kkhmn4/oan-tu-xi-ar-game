@@ -12,3 +12,7 @@ tmp/
 
 # Local Netlify folder
 .netlify
+
+# Sinh ra từ node_modules bằng scripts/copy-mediapipe.mjs
+public/mediapipe/wasm/
+public/mediapipe/vision_bundle.js

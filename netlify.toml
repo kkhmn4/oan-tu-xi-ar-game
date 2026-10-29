@@ -10,3 +10,14 @@
   from = "/*"
   to = "/index.html"
   status = 200
+
+# Mô hình và thư viện nhận diện tay (~19 MB): cho trình duyệt giữ lại 30 ngày, lần sau mở game không tải lại
+[[headers]]
+  for = "/mediapipe/*"
+  [headers.values]
+    Cache-Control = "public, max-age=2592000"
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=2592000"

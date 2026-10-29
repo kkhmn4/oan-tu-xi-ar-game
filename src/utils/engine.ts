@@ -16,6 +16,7 @@
 import { AdaptiveRPSAI, AIDifficulty, AIPostMatchInsight, ProbabilityDistribution } from '../ai';
 import { evaluateRPS, RPSChoice, RPSResult, RPS_CHOICES } from '../data/rps';
 import { audio } from './audio';
+import { LITE } from './device';
 import { detectRPSGesture, HAND_CONNECTIONS, LandmarkPoint } from './gesture';
 
 export type GamePhase =
@@ -171,6 +172,7 @@ export class GameEngine {
   private shakeTop = Infinity;
   private shakeBottom = -Infinity;
   private shakeArmed = true;
+  private previewDirty = true;
   private particles: Particle[] = [];
   private rings: Array<{ x: number; y: number; r: number; color: string; age: number }> = [];
 
@@ -190,6 +192,22 @@ export class GameEngine {
     return { ...this.state, history: [...this.state.history] };
   }
 
+  /** Đọc trạng thái hiện tại không sao chép (chỉ đọc), dùng trong vòng lặp khung hình. */
+  peek(): Readonly<GameState> {
+    return this.state;
+  }
+
+  hasVFX(): boolean {
+    return this.particles.length > 0 || this.rings.length > 0;
+  }
+
+  /** Ô camera nhỏ cần vẽ lại không (có tay mới hoặc đổi pha). Gọi xong thì xóa cờ. */
+  takePreviewDirty(): boolean {
+    const d = this.previewDirty;
+    this.previewDirty = false;
+    return d;
+  }
+
   getOverallTurnNumber(): number {
     return this.state.round === 1 ? this.state.turn : 5 + this.state.turn;
   }
@@ -203,6 +221,7 @@ export class GameEngine {
     this.videoW = videoW;
     this.videoH = videoH;
     const hasHand = !!(landmarks && landmarks.length >= 21);
+    this.previewDirty = true;
     this.landmarks = hasHand ? landmarks : null;
     this.state.handVisible = hasHand;
     this.state.liveGesture = hasHand ? detectRPSGesture(landmarks!).choice : null;
@@ -319,6 +338,7 @@ export class GameEngine {
 
   private enter(phase: GamePhase) {
     this.state.phase = phase;
+    this.previewDirty = true;
     this.phaseTime = 0;
     this.state.phaseProgress = 0;
     this.state.phaseRemaining = this.phaseDuration(phase);
@@ -605,7 +625,8 @@ export class GameEngine {
 
   private spawnConfetti() {
     const colors = ['#FF8A1F', '#FF4F8B', '#22C55E', '#1E9BFF', '#8B5CF6', '#FFC21A'];
-    for (let i = 0; i < 90; i++) {
+    const count = LITE ? 40 : 90;
+    for (let i = 0; i < count; i++) {
       const fromLeft = i % 2 === 0;
       this.particles.push({
         x: fromLeft ? this.width * 0.1 : this.width * 0.9,
