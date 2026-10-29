@@ -180,6 +180,7 @@ body {
 @keyframes flash { 0% { opacity: 0.85; } 100% { opacity: 0; } }
 @keyframes ping { 0% { transform: scale(1); opacity: 0.7; } 100% { transform: scale(1.6); opacity: 0; } }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes spin-ring { to { transform: rotate(360deg); } }
 @keyframes drop { 0% { transform: translateY(-6%); } 35% { transform: translateY(14%) scaleY(0.93); } 100% { transform: translateY(0); } }
 @keyframes pulse-text { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
 @keyframes shake-once { 0%, 100% { transform: translateX(0); } 15%, 55% { transform: translateX(-18px); } 35%, 75% { transform: translateX(18px); } }
@@ -199,6 +200,8 @@ body {
 .anim-ping { animation: ping 1.2s ease-out infinite; }
 .anim-fade { animation: fade-in 0.3s ease-out both; }
 .anim-drop { animation: drop 0.32s ease-out both; }
+.anim-spin { animation: spin-ring 6s linear infinite; }
+.anim-spin-rev { animation: spin-ring 9s linear infinite reverse; }
 .anim-pulse-text { animation: pulse-text 0.8s ease-in-out infinite; }
 .anim-shake-once { animation: shake-once 0.45s ease-in-out both; }
 
@@ -238,6 +241,7 @@ body {
 /* Máy tính bảng màn thấp (1024x600): thu nhỏ đều các trang nội dung để vừa một màn, không phải cuộn */
 @media (max-height: 680px) {
   .fit-short { zoom: 0.78; }
+  .hide-short { display: none; }
 }
 
 /* Chế độ nhẹ cho máy yếu (src/utils/device.ts gắn lớp .lite): tắt chuyển động chạy mãi không cần thiết */

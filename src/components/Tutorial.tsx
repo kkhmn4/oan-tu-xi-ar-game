@@ -1,5 +1,5 @@
 import { ReactNode } from 'react';
-import { ALL_RPS_CHOICES, BOT_IMAGES, RPS_CHOICES } from '../data/rps';
+import { ALL_RPS_CHOICES, RPS_CHOICES } from '../data/rps';
 import { HandSkeletonSvg } from './HandSkeletonSvg';
 import { TopBar } from './Intro';
 
@@ -11,10 +11,10 @@ interface TutorialProps {
 }
 
 const BEAT_STRIP = [
-  { word: 'OẲN', c: 'var(--rock)', note: 'lắc lần 1' },
-  { word: 'TÙ', c: 'var(--sky)', note: 'lắc lần 2' },
-  { word: 'XÌ', c: 'var(--lose)', note: 'lắc lần 3, ra tay' },
-  { word: '🔒 CHỐT', c: 'var(--ink)', note: 'máy khóa tay em' },
+  { word: '🔒 CHỐT', c: 'var(--ink)', note: 'giữ yên tay' },
+  { word: 'OẲN', c: 'var(--rock)', note: 'lắc, vòng 1/3' },
+  { word: 'TÙ', c: 'var(--sky)', note: 'lắc, vòng 2/3' },
+  { word: 'XÌ', c: 'var(--lose)', note: 'vòng đầy, mở thẻ' },
 ];
 
 export function Tutorial({ isFullscreen, onBack, onToggleFullscreen, onStart }: TutorialProps) {
@@ -36,17 +36,7 @@ export function Tutorial({ isFullscreen, onBack, onToggleFullscreen, onStart }: 
 
       <main className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center justify-center-safe fit-short gap-3 sm:gap-4 px-3 sm:px-5 py-3 max-w-6xl mx-auto w-full">
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 w-full">
-          <Step n={1} color="var(--sky)" title="Giơ 1 bàn tay" text="Đưa tay vào trước camera. Máy chỉ nhìn các khớp tay, không hiện hình em.">
-            <div className="h-full aspect-square rounded-2xl bg-[var(--sky-soft)] p-2">
-              <HandSkeletonSvg gesture="paper" color="#1E9BFF" glow={false} />
-            </div>
-          </Step>
-
-          <Step n={2} color="var(--rock)" title="Lắc tay để hô" text="Nắm tay, lắc xuống. Mỗi lần lắc, máy hô một tiếng: OẲN, TÙ, XÌ.">
-            <img src={RPS_CHOICES.rock.image} alt="" className="h-full object-contain anim-wiggle" />
-          </Step>
-
-          <Step n={3} color="var(--lose)" title="Đến XÌ: ra tay" text="Lần lắc thứ 3 là XÌ: ra Búa, Kéo hoặc Bao, giữ yên đến khi hết vòng đỏ.">
+          <Step n={1} color="var(--sky)" title="Ra tay" text="Giơ Búa, Kéo hoặc Bao trước camera. Máy chỉ nhìn các khớp tay, không hiện hình em.">
             <div className="flex items-end gap-1 h-full">
               {ALL_RPS_CHOICES.map((c) => (
                 <img key={c} src={RPS_CHOICES[c].image} alt={RPS_CHOICES[c].label} className="h-[85%] object-contain" />
@@ -54,16 +44,30 @@ export function Tutorial({ isFullscreen, onBack, onToggleFullscreen, onStart }: 
             </div>
           </Step>
 
-          <Step n={4} color="var(--grape)" title="Máy CHỐT, lật bài" text="Máy khóa tay em, rồi mới lật bài của máy. Xem ai thắng!">
-            <div className="relative h-full flex items-center">
-              <img src={BOT_IMAGES.draw} alt="" className="h-full object-contain" />
-              <span className="absolute -right-3 top-0 chip text-base" style={{ ['--c' as string]: 'var(--ink)' }}>🔒</span>
+          <Step n={2} color="var(--ink)" title="Máy chốt" text="Giữ yên tay cho vòng quanh tay chạy đầy. Máy khóa lựa chọn của em.">
+            <div className="relative h-full aspect-square rounded-full bg-white border-[6px] border-[var(--ink)] flex items-center justify-center">
+              <img src={RPS_CHOICES.scissors.image} alt="" className="h-[78%] object-contain" />
+              <span className="absolute -right-2 -top-2 chip text-lg" style={{ ['--c' as string]: 'var(--ink)' }}>🔒</span>
+            </div>
+          </Step>
+
+          <Step n={3} color="var(--rock)" title="Lắc tay" text="Lắc tay qua lại cho vòng quanh tay đầy dần. Máy hô OẲN, TÙ, XÌ theo vòng.">
+            <img src={RPS_CHOICES.scissors.image} alt="" className="h-full object-contain anim-wiggle" />
+          </Step>
+
+          <Step n={4} color="var(--grape)" title="Mở thẻ" text="Vòng đầy là máy mở thẻ của máy. Xem ai thắng!">
+            <div className="flex items-center gap-2 h-full">
+              <div className="relative h-[80%] aspect-[3/4] rounded-2xl bg-[var(--grape)] flex items-center justify-center shadow-[0_5px_0_var(--grape-dark)]">
+                <span className="title text-white text-4xl">?</span>
+              </div>
+              <span className="title text-3xl text-[var(--grape)]">›</span>
+              <img src={RPS_CHOICES.paper.image} alt="" className="h-[85%] object-contain -scale-x-100" />
             </div>
           </Step>
         </div>
 
         <div className="card w-full p-3 flex flex-col items-center gap-2" style={{ ['--c' as string]: 'var(--sun)', ['--cs' as string]: 'var(--sun-dark)' }}>
-          <span className="font-extrabold text-lg sm:text-xl">Nhịp của một lượt: em lắc, máy hô</span>
+          <span className="font-extrabold text-lg sm:text-xl">Nhịp của một lượt: chốt tay trước, rồi lắc cho vòng đầy</span>
           <div className="flex flex-wrap items-center justify-center gap-1.5 sm:gap-2">
             {BEAT_STRIP.map((b, i) => (
               <div key={b.word} className="flex items-center gap-1.5 sm:gap-2">

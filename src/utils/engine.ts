@@ -1,16 +1,17 @@
 // Engine chính cho game AR Oẳn Tù Xì
 //
-// Mỗi lượt đi qua các pha theo đúng một chiều, mỗi pha có thời lượng cố định
-// để học sinh nhìn màn hình là biết đang ở đâu:
+// Mỗi lượt đi theo một chiều, học sinh nhìn màn hình là biết đang ở bước nào:
 //
-//   TURN_INTRO  "Lượt 3"                           1,4 s
-//   WAIT_HAND   chờ thấy bàn tay trước camera       (đến khi thấy tay)
-//   CHANT       mỗi lần LẮC TAY xuống, máy hô một tiếng: OẲN, TÙ, rồi XÌ
-//               (chơi bằng nút: tự hô theo nhịp 0,85 s). Ngừng lắc 1,6 s thì nhắc "Lắc tay để tiếp tục".
-//   SHOW        XÌ! ra tay và giữ yên              1,2 s  (máy đếm phiếu ở 0,8 s cuối)
-//   LOCKED      CHỐT! khóa thế tay của người chơi   0,9 s
-//   REVEAL      máy lật bài, báo thắng thua         3,4 s  (bấm "Lượt tiếp" để đi nhanh)
-//   RETRY       không thấy tay lúc chốt: chơi lại lượt đó, không tính điểm
+//   TURN_INTRO  "Lượt 3"                                      1,4 s
+//   WAIT_HAND   chờ thấy bàn tay trước camera                  (đến khi thấy tay)
+//   CHOOSE      RA TAY: giữ yên Búa, Kéo hoặc Bao              giữ đủ 0,8 s là chốt
+//               (chơi bằng nút: bấm một nút là chốt)
+//   LOCKED      CHỐT! khóa lựa chọn của người chơi             0,9 s
+//   CHANT       lắc tay qua lại (hướng nào cũng được) cho vòng quanh tay đầy dần:
+//               đầy 1/3 hô OẲN, 2/3 hô TÙ, đầy hết hô XÌ (chơi bằng nút: vòng tự đầy trong 2,1 s).
+//               Ngừng lắc 1,6 s thì nhắc "Lắc tay để tiếp tục".
+//   SHOW        XÌ! máy mở thẻ                                 0,6 s
+//   REVEAL      thẻ của máy đã mở, báo thắng thua              3,4 s  (bấm "Lượt tiếp" để đi nhanh)
 //
 // Hết lượt 5 của vòng 1 vào ROUND_GAP: đổi bạn, bấm nút để vào vòng 2.
 import { AdaptiveRPSAI, AIDifficulty, AIPostMatchInsight, ProbabilityDistribution } from '../ai';
@@ -22,11 +23,11 @@ import { detectRPSGesture, HAND_CONNECTIONS, LandmarkPoint } from './gesture';
 export type GamePhase =
   | 'TURN_INTRO'
   | 'WAIT_HAND'
+  | 'CHOOSE'
+  | 'LOCKED'
   | 'CHANT'
   | 'SHOW'
-  | 'LOCKED'
   | 'REVEAL'
-  | 'RETRY'
   | 'ROUND_GAP'
   | 'GAMEOVER';
 
@@ -34,18 +35,18 @@ export type InputMode = 'camera' | 'buttons';
 
 export const TIMING = {
   turnIntro: 1.4,
-  chantBeat: 0.85,
-  show: 1.2,
-  showVoteFrom: 0.4, // bỏ 0,4 s đầu của XÌ cho tay kịp thành hình rồi mới đếm phiếu
+  holdToLock: 0.8, // giữ yên một thế tay chừng này giây thì máy chốt
+  holdGrace: 0.25, // mất dấu tay trong khoảng ngắn này thì chưa tính là đổi tay
   locked: 0.9,
+  chantBeat: 0.7, // nhịp hô tự động khi chơi bằng nút
+  show: 0.6,
   reveal: 3.4,
-  retry: 2.2,
   roundGapAuto: 20,
   handStableMs: 300,
   shakeIdle: 1.6, // ngừng lắc quá lâu thì hiện lời nhắc
-  shakeMinGap: 0.28, // hai lần lắc phải cách nhau ít nhất chừng này giây
-  shakeDown: 0.35, // biên độ lắc xuống, tính theo chiều dài lòng bàn tay
-  shakeUp: 0.22, // biên độ nhấc lên trước lần lắc sau
+  shakeTravel: 4, // tay đi tổng cộng chừng này lần chiều dài lòng bàn tay thì vòng đầy (khoảng 3 lần lắc)
+  shakeNoise: 0.03, // dịch chuyển nhỏ hơn mức này mỗi lần đo là tay rung, không tính
+  shakeJump: 0.6, // nhảy xa hơn mức này mỗi lần đo là nhận diện bị giật, không tính
 };
 
 export interface TurnHistoryItem {
@@ -77,8 +78,10 @@ export interface GameState {
   totalLosses: number;
   totalDraws: number;
   chantWord: 'OẲN' | 'TÙ' | 'XÌ' | '';
-  beat: number; // số lần lắc đã ghi nhận trong lượt (0..3)
+  beat: number; // số tiếng đã hô trong lượt (0..3): OẲN, TÙ, XÌ
+  shakeProgress: number; // 0..1: vòng lắc tay đầy tới đâu
   needShake: boolean; // đang chờ lắc quá lâu: hiện "Lắc tay để tiếp tục"
+  holdProgress: number; // 0..1: giữ yên thế tay bao lâu rồi (lúc RA TAY)
   inputMode: InputMode;
   liveGesture: RPSChoice | null; // thế tay máy đang thấy (chưa chốt)
   handVisible: boolean;
@@ -88,7 +91,6 @@ export interface GameState {
   lastScoreGain: number;
   resultMessage: string;
   resultDetail: string;
-  retryReason: string;
   isGameOver: boolean;
   isWin: boolean;
   history: TurnHistoryItem[];
@@ -119,7 +121,9 @@ export function createInitialState(difficulty: AIDifficulty = 'normal', inputMod
     totalDraws: 0,
     chantWord: '',
     beat: 0,
+    shakeProgress: 0,
     needShake: false,
+    holdProgress: 0,
     inputMode,
     liveGesture: null,
     handVisible: false,
@@ -129,7 +133,6 @@ export function createInitialState(difficulty: AIDifficulty = 'normal', inputMod
     lastScoreGain: 0,
     resultMessage: '',
     resultDetail: '',
-    retryReason: '',
     isGameOver: false,
     isWin: false,
     history: [],
@@ -149,6 +152,13 @@ interface Particle {
   alpha: number;
 }
 
+interface Pt {
+  x: number;
+  y: number;
+}
+
+const dist = (a: Pt, b: Pt) => Math.hypot(a.x - b.x, a.y - b.y);
+
 export class GameEngine {
   private width = 960;
   private height = 540;
@@ -160,18 +170,16 @@ export class GameEngine {
   private landmarks: LandmarkPoint[] | null = null; // tọa độ pixel trong khung video (đã lật gương)
   private videoW = 640;
   private videoH = 480;
-  private buttonChoice: RPSChoice | null = null;
   private phaseTime = 0;
   private handSeenMs = 0;
-  private votes: Record<RPSChoice, number> = { rock: 0, paper: 0, scissors: 0 };
-  private lastSeenInShow: RPSChoice | null = null;
   private clock = 0;
-  private lastBeatAt = 0;
-  // Bộ dò lắc tay: theo dõi tâm bàn tay lên xuống
-  private shakeY: number | null = null;
-  private shakeTop = Infinity;
-  private shakeBottom = -Infinity;
-  private shakeArmed = true;
+  // Giữ yên thế tay để chốt
+  private holdGesture: RPSChoice | null = null;
+  private holdTime = 0;
+  private missTime = 0;
+  // Bộ đo lắc tay: cộng dồn quãng đường tâm bàn tay đi được, hướng nào cũng được
+  private shakePos: Pt | null = null;
+  private lastShakeGainAt = 0;
   private previewDirty = true;
   private particles: Particle[] = [];
   private rings: Array<{ x: number; y: number; r: number; color: string; age: number }> = [];
@@ -230,40 +238,33 @@ export class GameEngine {
   }
 
   private resetShake() {
-    this.shakeY = null;
-    this.shakeTop = Infinity;
-    this.shakeBottom = -Infinity;
-    this.shakeArmed = true;
+    this.shakePos = null;
   }
 
-  /** Một lần lắc = tâm bàn tay đi xuống đủ xa rồi được nhấc lên lại. Đếm ngay lúc đi xuống, đúng nhịp hô. */
+  /** Lắc tay: quãng đường tâm bàn tay đi được (tính theo chiều dài lòng bàn tay) làm vòng đầy dần. */
   private trackShake(lm: LandmarkPoint[]) {
     const palm = Math.hypot(lm[9].x - lm[0].x, lm[9].y - lm[0].y) || 1;
-    const rawY = (lm[0].y + lm[9].y) / 2;
-    this.shakeY = this.shakeY === null ? rawY : this.shakeY * 0.4 + rawY * 0.6;
-    const y = this.shakeY;
-
-    if (this.shakeArmed) {
-      this.shakeTop = Math.min(this.shakeTop, y);
-      if (y - this.shakeTop > TIMING.shakeDown * palm) {
-        this.shakeArmed = false;
-        this.shakeBottom = y;
-        this.onShake();
-      }
-    } else {
-      this.shakeBottom = Math.max(this.shakeBottom, y);
-      if (this.shakeBottom - y > TIMING.shakeUp * palm) {
-        this.shakeArmed = true;
-        this.shakeTop = y;
-      }
-    }
+    const raw = { x: (lm[0].x + lm[9].x) / 2, y: (lm[0].y + lm[9].y) / 2 };
+    const prev = this.shakePos;
+    const p = prev ? { x: prev.x * 0.35 + raw.x * 0.65, y: prev.y * 0.35 + raw.y * 0.65 } : raw;
+    this.shakePos = p;
+    if (!prev || this.state.phase !== 'CHANT' || this.state.inputMode !== 'camera') return;
+    const d = dist(p, prev) / palm;
+    if (d < TIMING.shakeNoise || d > TIMING.shakeJump) return;
+    this.lastShakeGainAt = this.clock;
+    this.setShakeProgress(this.state.shakeProgress + d / TIMING.shakeTravel);
   }
 
-  private onShake() {
-    if (this.state.phase !== 'CHANT' || this.state.inputMode !== 'camera') return;
-    if (this.clock - this.lastBeatAt < TIMING.shakeMinGap) return;
-    this.lastBeatAt = this.clock;
+  /** Vòng lắc đầy tới đâu thì hô tới đó: 1/3 OẲN, 2/3 TÙ, đầy hết XÌ rồi mở thẻ. */
+  private setShakeProgress(v: number) {
+    this.state.shakeProgress = Math.min(1, v);
     this.state.needShake = false;
+    const want = this.state.shakeProgress >= 1 ? 3 : this.state.shakeProgress >= 2 / 3 ? 2 : this.state.shakeProgress >= 1 / 3 ? 1 : 0;
+    while (this.state.beat < want && this.state.phase === 'CHANT') this.beat();
+  }
+
+  /** Một tiếng hô: OẲN, TÙ, rồi XÌ thì mở thẻ. */
+  private beat() {
     this.state.beat += 1;
     if (this.state.beat === 1) {
       this.state.chantWord = 'OẲN';
@@ -273,18 +274,15 @@ export class GameEngine {
       audio.playChant('tu');
     } else {
       this.enter('SHOW');
-      return;
     }
-    this.emit();
   }
 
-  /** Chế độ nút bấm: chọn thế tay. Chỉ nhận trong lúc hô và lúc XÌ. */
+  /** Chế độ nút bấm: bấm một thế tay là chốt luôn. */
   chooseByButton(choice: RPSChoice) {
-    if (this.state.phase !== 'CHANT' && this.state.phase !== 'SHOW') return;
-    this.buttonChoice = choice;
+    if (this.state.phase !== 'CHOOSE') return;
     this.state.liveGesture = choice;
     audio.playClick();
-    this.emit();
+    this.lockPlayer(choice);
   }
 
   setInputMode(mode: InputMode) {
@@ -292,8 +290,9 @@ export class GameEngine {
     if (mode === 'buttons') {
       this.landmarks = null;
       this.state.handVisible = false;
-      this.state.liveGesture = this.buttonChoice;
-      if (this.state.phase === 'WAIT_HAND' || this.state.phase === 'CHANT') this.enter('CHANT');
+      this.state.liveGesture = null;
+      if (this.state.phase === 'WAIT_HAND') this.enter('CHOOSE');
+      else if (this.state.phase === 'CHANT') this.enter('CHANT'); // chuyển sang tự hô
     }
     this.emit();
   }
@@ -319,16 +318,14 @@ export class GameEngine {
     switch (phase) {
       case 'TURN_INTRO':
         return TIMING.turnIntro;
-      case 'CHANT':
-        return this.state.inputMode === 'buttons' ? TIMING.chantBeat * 2 : 0;
-      case 'SHOW':
-        return TIMING.show;
       case 'LOCKED':
         return TIMING.locked;
+      case 'CHANT':
+        return this.state.inputMode === 'buttons' ? TIMING.chantBeat * 3 : 0;
+      case 'SHOW':
+        return TIMING.show;
       case 'REVEAL':
         return TIMING.reveal;
-      case 'RETRY':
-        return TIMING.retry;
       case 'ROUND_GAP':
         return TIMING.roundGapAuto;
       default:
@@ -342,25 +339,22 @@ export class GameEngine {
     this.phaseTime = 0;
     this.state.phaseProgress = 0;
     this.state.phaseRemaining = this.phaseDuration(phase);
+    this.state.needShake = false;
 
-    if (phase === 'CHANT') {
+    if (phase === 'CHOOSE') {
+      this.holdGesture = null;
+      this.holdTime = 0;
+      this.missTime = 0;
+      this.state.holdProgress = 0;
+      this.state.chantWord = '';
+    } else if (phase === 'CHANT') {
       this.state.beat = 0;
-      this.state.needShake = false;
-      this.lastBeatAt = this.clock;
-      if (this.state.inputMode === 'buttons') {
-        this.state.chantWord = 'OẲN';
-        this.state.beat = 1;
-        audio.playChant('oan');
-      } else {
-        this.state.chantWord = '';
-        this.resetShake();
-      }
+      this.state.shakeProgress = 0;
+      this.state.chantWord = '';
+      this.lastShakeGainAt = this.clock;
     } else if (phase === 'SHOW') {
       this.state.chantWord = 'XÌ';
       this.state.beat = 3;
-      this.state.needShake = false;
-      this.votes = { rock: 0, paper: 0, scissors: 0 };
-      this.lastSeenInShow = null;
       audio.playChant('xi');
     } else if (phase === 'WAIT_HAND') {
       this.handSeenMs = 0;
@@ -381,14 +375,15 @@ export class GameEngine {
     this.pendingAIChoice = prediction.chosenAIChoice;
     this.state.predictedPlayerProbabilities = prediction.predictedPlayerProbabilities;
 
-    this.buttonChoice = null;
     this.state.playerChoice = null;
     this.state.aiChoice = null;
     this.state.lastResult = null;
     this.state.lastScoreGain = 0;
     this.state.resultMessage = '';
     this.state.resultDetail = '';
-    this.state.retryReason = '';
+    this.state.beat = 0;
+    this.state.shakeProgress = 0;
+    this.state.holdProgress = 0;
     if (this.state.inputMode === 'buttons') this.state.liveGesture = null;
     audio.playNewTurn();
     this.enter('TURN_INTRO');
@@ -412,18 +407,47 @@ export class GameEngine {
     switch (phase) {
       case 'TURN_INTRO':
         if (this.phaseTime >= dur) {
-          this.enter(this.state.inputMode === 'camera' && !this.state.handVisible ? 'WAIT_HAND' : 'CHANT');
+          this.enter(this.state.inputMode === 'camera' && !this.state.handVisible ? 'WAIT_HAND' : 'CHOOSE');
           return;
         }
         break;
 
       case 'WAIT_HAND':
         if (this.state.inputMode !== 'camera') {
-          this.enter('CHANT');
+          this.enter('CHOOSE');
           return;
         }
         this.handSeenMs = this.state.handVisible ? this.handSeenMs + dtMs : 0;
         if (this.handSeenMs >= TIMING.handStableMs) {
+          this.enter('CHOOSE');
+          return;
+        }
+        break;
+
+      case 'CHOOSE': {
+        if (this.state.inputMode !== 'camera') break; // chờ bấm nút
+        const g = this.state.liveGesture;
+        if (g && g === this.holdGesture) {
+          this.holdTime += dt;
+          this.missTime = 0;
+        } else if (g) {
+          this.holdGesture = g; // đổi thế tay: giữ lại từ đầu
+          this.holdTime = 0;
+          this.missTime = 0;
+        } else {
+          this.missTime += dt;
+          if (this.missTime > TIMING.holdGrace) this.holdTime = Math.max(0, this.holdTime - dt * 2);
+        }
+        this.state.holdProgress = Math.min(1, this.holdTime / TIMING.holdToLock);
+        if (this.holdGesture && this.holdTime >= TIMING.holdToLock) {
+          this.lockPlayer(this.holdGesture);
+          return;
+        }
+        break;
+      }
+
+      case 'LOCKED':
+        if (this.phaseTime >= dur) {
           this.enter('CHANT');
           return;
         }
@@ -431,33 +455,15 @@ export class GameEngine {
 
       case 'CHANT':
         if (this.state.inputMode === 'camera') {
-          // Nhịp do người chơi lắc tay; chỉ nhắc khi ngừng lắc hoặc mất tay
-          this.state.needShake = !this.state.handVisible || this.clock - this.lastBeatAt > TIMING.shakeIdle;
+          // Vòng đầy theo tay lắc; chỉ nhắc khi ngừng lắc hoặc mất tay
+          this.state.needShake = !this.state.handVisible || this.clock - this.lastShakeGainAt > TIMING.shakeIdle;
           break;
         }
-        if (this.phaseTime >= TIMING.chantBeat && this.state.chantWord === 'OẲN') {
-          this.state.chantWord = 'TÙ';
-          this.state.beat = 2;
-          audio.playChant('tu');
-        }
-        if (this.phaseTime >= dur) {
-          this.enter('SHOW');
-          return;
-        }
+        this.setShakeProgress(this.phaseTime / dur); // chơi bằng nút: vòng tự đầy
+        if (this.state.phase !== 'CHANT') return;
         break;
 
-      case 'SHOW': {
-        const g = this.state.inputMode === 'buttons' ? this.buttonChoice : this.state.liveGesture;
-        if (g) this.lastSeenInShow = g;
-        if (g && this.phaseTime >= TIMING.showVoteFrom) this.votes[g] += dtMs;
-        if (this.phaseTime >= dur) {
-          this.lockPlayer();
-          return;
-        }
-        break;
-      }
-
-      case 'LOCKED':
+      case 'SHOW':
         if (this.phaseTime >= dur) {
           this.reveal();
           return;
@@ -467,13 +473,6 @@ export class GameEngine {
       case 'REVEAL':
         if (this.phaseTime >= dur) {
           this.advanceTurn();
-          return;
-        }
-        break;
-
-      case 'RETRY':
-        if (this.phaseTime >= dur) {
-          this.startTurn();
           return;
         }
         break;
@@ -489,31 +488,11 @@ export class GameEngine {
     this.emit();
   }
 
-  /** Hết XÌ: thế tay xuất hiện lâu nhất trong cửa sổ đếm phiếu là thế tay được chốt. */
-  private lockPlayer() {
-    let best: RPSChoice | null = null;
-    let bestMs = 0;
-    for (const c of ['rock', 'paper', 'scissors'] as RPSChoice[]) {
-      if (this.votes[c] > bestMs) {
-        bestMs = this.votes[c];
-        best = c;
-      }
-    }
-    const locked = best ?? this.lastSeenInShow;
-
-    if (!locked) {
-      this.state.retryReason =
-        this.state.inputMode === 'buttons'
-          ? 'Em chưa bấm chọn Búa, Kéo hay Bao.'
-          : 'Máy chưa thấy rõ tay em lúc XÌ.';
-      audio.playLose();
-      this.enter('RETRY');
-      return;
-    }
-
-    this.state.playerChoice = locked;
+  private lockPlayer(choice: RPSChoice) {
+    this.state.playerChoice = choice;
+    this.state.holdProgress = 1;
     audio.playLock();
-    this.spawnRing(this.width * 0.25, this.height * 0.5, '#1E9BFF');
+    this.spawnRing(this.width * 0.25, this.height * 0.5, RPS_CHOICES[choice].color);
     this.enter('LOCKED');
   }
 
