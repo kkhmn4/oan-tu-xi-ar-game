@@ -119,6 +119,7 @@ export default function App() {
             onOpenSetup={() => setProfileModalOpen(true)}
             onToggleFullscreen={toggleFullscreen}
             onStart={() => setScreen('tutorial')}
+            onPlayNow={handleStartGame}
           />
         </div>
       ) : screen === 'tutorial' ? (
