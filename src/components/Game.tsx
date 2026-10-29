@@ -1,634 +1,788 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { FilesetResolver, HandLandmarker, HandLandmarkerResult } from '@mediapipe/tasks-vision';
+import { RefObject, useCallback, useEffect, useRef, useState } from 'react';
+import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 import { AIDifficulty } from '../ai';
 import { BRAND_MASCOTS } from '../data/brand';
 import { PlayerProfile } from '../data/characters';
-import { RPS_CHOICES } from '../data/rps';
+import { ALL_RPS_CHOICES, BOT_IMAGES, HAND_WAITING_IMAGE, RPSChoice, RPS_CHOICES } from '../data/rps';
 import { audio } from '../utils/audio';
-import { GameEngine, GameState } from '../utils/engine';
+import { GameEngine, GamePhase, GameState, InputMode } from '../utils/engine';
 import { LandmarkPoint } from '../utils/gesture';
 import { CharacterAvatar, getCharacterById } from './PlayerSetupModal';
-import { TenRoundProgressBar } from './TenRoundProgressBar';
 
 const MAX_CANVAS_PIXEL_RATIO = 1.5;
 const MAX_FRAME_DELTA_MS = 50;
-const MAX_PHYSICS_STEP_MS = 1000 / 120;
-const UI_STATE_PUBLISH_INTERVAL_MS = 75;
+const HAND_DETECT_INTERVAL_MS = 33; // ~30 lần/giây là đủ, đỡ nóng máy tính bảng
+const UI_PUBLISH_INTERVAL_MS = 50;
+
+const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm';
+const MODEL_URL =
+  'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
 interface GameProps {
   profile: PlayerProfile;
-  demoMode: boolean;
   difficulty?: AIDifficulty;
   onGameOver: (state: GameState) => void;
   onStateUpdate: (state: GameState) => void;
 }
 
-export function Game({ profile, demoMode, difficulty = 'normal', onGameOver, onStateUpdate }: GameProps) {
+export function Game({ profile, difficulty = 'normal', onGameOver, onStateUpdate }: GameProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fxCanvasRef = useRef<HTMLCanvasElement>(null);
+  const previewCanvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const landmarkerRef = useRef<HandLandmarker | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const engineRef = useRef<GameEngine | null>(null);
-  const requestRef = useRef<number>(0);
-  const lastVideoTimeRef = useRef<number>(-1);
-  const lastHandDetectMsRef = useRef<number>(0);
-  const cachedLandmarksRef = useRef<LandmarkPoint[] | null>(null);
-  const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
-  const pixelRatioRef = useRef(1);
+  const rafRef = useRef(0);
+  const lastVideoTimeRef = useRef(-1);
+  const lastDetectRef = useRef(0);
+  const isProcessingRef = useRef(false); // cờ chống chồng khung nhận diện
   const finishedRef = useRef(false);
   const onGameOverRef = useRef(onGameOver);
   const onStateUpdateRef = useRef(onStateUpdate);
-
   onGameOverRef.current = onGameOver;
   onStateUpdateRef.current = onStateUpdate;
 
-  const [isLoading, setIsLoading] = useState(!demoMode);
+  const [loading, setLoading] = useState(true);
   const [cameraError, setCameraError] = useState<string | null>(null);
-  const [cameraReady, setCameraReady] = useState(false);
-  const [engineState, setEngineState] = useState<GameState | null>(null);
-
-  const selectedChar = getCharacterById(profile.characterId);
-
-  // Giải phóng phần cứng camera & AI model
-  const stopCamera = useCallback(() => {
-    if (requestRef.current) {
-      cancelAnimationFrame(requestRef.current);
-      requestRef.current = 0;
-    }
-
-    if (mediaStreamRef.current) {
-      try {
-        mediaStreamRef.current.getTracks().forEach((track) => track.stop());
-      } catch (e) {
-        console.warn('Lỗi dừng camera track:', e);
-      }
-      mediaStreamRef.current = null;
-    }
-
-    const video = videoRef.current;
-    if (video) {
-      try {
-        if (video.srcObject) {
-          (video.srcObject as MediaStream).getTracks().forEach((t) => t.stop());
-          video.srcObject = null;
-        }
-        video.pause();
-      } catch {
-        // ignore
-      }
-    }
-
-    if (landmarkerRef.current) {
-      try {
-        landmarkerRef.current.close();
-      } catch (e) {
-        console.warn('Lỗi đóng landmarker:', e);
-      }
-      landmarkerRef.current = null;
-    }
-  }, []);
+  const [state, setState] = useState<GameState | null>(null);
 
   useEffect(() => {
-    let active = true;
-    let lastPublishedAt = -Infinity;
-    finishedRef.current = false;
+    if (!cameraError) return;
+    const t = window.setTimeout(() => setCameraError(null), 5000);
+    return () => window.clearTimeout(t);
+  }, [cameraError]);
 
-    engineRef.current = new GameEngine((state) => {
+  const stopCamera = useCallback(() => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    const video = videoRef.current;
+    if (video) {
+      video.srcObject = null;
+      video.pause();
+    }
+    try {
+      landmarkerRef.current?.close();
+    } catch {
+      // bỏ qua
+    }
+    landmarkerRef.current = null;
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Vòng lặp khung hình: nhận diện tay, cập nhật engine, vẽ hiệu ứng
+  // ---------------------------------------------------------------------------
+  const runLoop = useCallback(() => {
+    let last = performance.now();
+    let lastPublish = -Infinity;
+    let lastPhase: GamePhase | null = null;
+    let lastWord = '';
+
+    const detect = (engine: GameEngine) => {
+      const video = videoRef.current;
+      const lm = landmarkerRef.current;
+      if (!video || !lm || video.readyState < 2) return;
       const now = performance.now();
-      if (now - lastPublishedAt >= UI_STATE_PUBLISH_INTERVAL_MS || state.phase !== engineState?.phase) {
-        lastPublishedAt = now;
-        setEngineState(state);
-        onStateUpdateRef.current(state);
+      if (isProcessingRef.current) return;
+      if (now - lastDetectRef.current < HAND_DETECT_INTERVAL_MS || video.currentTime === lastVideoTimeRef.current) return;
+      lastDetectRef.current = now;
+      isProcessingRef.current = true;
+      lastVideoTimeRef.current = video.currentTime;
+      let hand: LandmarkPoint[] | null = null;
+      try {
+        const res = lm.detectForVideo(video, now);
+        const first = res?.landmarks?.[0];
+        if (first) {
+          const vw = video.videoWidth || 640;
+          const vh = video.videoHeight || 480;
+          hand = first.map((p) => ({ x: (1 - p.x) * vw, y: p.y * vh, z: p.z }));
+        }
+      } catch {
+        return;
+      } finally {
+        isProcessingRef.current = false;
+      }
+      engine.updateHand(hand, video.videoWidth || 640, video.videoHeight || 480);
+    };
+
+    const frame = (t: number) => {
+      if (finishedRef.current) return;
+      const engine = engineRef.current;
+      const canvas = fxCanvasRef.current;
+      const box = containerRef.current;
+      if (!engine || !canvas || !box) return;
+
+      const dt = Math.max(0, Math.min(MAX_FRAME_DELTA_MS, t - last));
+      last = t;
+
+      if (engine.getState().inputMode === 'camera') detect(engine);
+      engine.update(dt);
+
+      const w = Math.max(1, box.clientWidth);
+      const h = Math.max(1, box.clientHeight);
+      const pr = Math.min(MAX_CANVAS_PIXEL_RATIO, window.devicePixelRatio || 1);
+      if (canvas.width !== Math.floor(w * pr) || canvas.height !== Math.floor(h * pr)) {
+        canvas.width = Math.floor(w * pr);
+        canvas.height = Math.floor(h * pr);
+        engine.resize(w, h);
+      }
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.setTransform(pr, 0, 0, pr, 0, 0);
+        engine.draw(ctx);
       }
 
-      if (state.isGameOver && !finishedRef.current) {
+      const pv = previewCanvasRef.current;
+      if (pv) {
+        const pw = pv.clientWidth;
+        const ph = pv.clientHeight;
+        if (pw > 0 && (pv.width !== Math.floor(pw * pr) || pv.height !== Math.floor(ph * pr))) {
+          pv.width = Math.floor(pw * pr);
+          pv.height = Math.floor(ph * pr);
+        }
+        const pctx = pv.getContext('2d');
+        if (pctx && pw > 0) {
+          pctx.setTransform(pr, 0, 0, pr, 0, 0);
+          engine.drawHandPreview(pctx, pw, ph);
+        }
+      }
+
+      const s = engine.getState();
+      if (s.phase !== lastPhase || s.chantWord !== lastWord || t - lastPublish >= UI_PUBLISH_INTERVAL_MS) {
+        lastPhase = s.phase;
+        lastWord = s.chantWord;
+        lastPublish = t;
+        setState(s);
+        onStateUpdateRef.current(s);
+      }
+      if (s.isGameOver && !finishedRef.current) {
         finishedRef.current = true;
         stopCamera();
-        onGameOverRef.current(state);
-      }
-    }, difficulty);
-
-    const init = async () => {
-      audio.init();
-      if (!active) return;
-
-      if (demoMode) {
-        setIsLoading(false);
-        startGameLoop();
+        onGameOverRef.current(s);
         return;
       }
+      rafRef.current = requestAnimationFrame(frame);
+    };
+    rafRef.current = requestAnimationFrame(frame);
+  }, [stopCamera]);
 
+  const startEngine = useCallback(
+    (mode: InputMode) => {
+      if (engineRef.current) return;
+      engineRef.current = new GameEngine(() => undefined, difficulty, mode);
+      setLoading(false);
+      runLoop();
+    },
+    [difficulty, runLoop]
+  );
+
+  const switchToButtons = useCallback(() => {
+    stopCamera();
+    if (engineRef.current) engineRef.current.setInputMode('buttons');
+    else startEngine('buttons');
+  }, [startEngine, stopCamera]);
+
+  // Mở camera và nạp mô hình nhận diện tay
+  useEffect(() => {
+    let active = true;
+    finishedRef.current = false;
+    audio.init();
+
+    const init = async () => {
       try {
-        const vision = await FilesetResolver.forVisionTasks(
-          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm'
-        );
-        if (!active || finishedRef.current) return;
-
-        // Chỉ nhận diện 1 bàn tay duy nhất theo yêu cầu
-        // Tối ưu cho Tablet TECLAST-P30 (Mali-G57 / Unisoc T7200 / Android 16):
-        // Thử GPU trước, nếu GPU shader/WebGL lỗi thì tự động fallback sang CPU mượt mà!
-        let landmarker: HandLandmarker | null = null;
+        const vision = await FilesetResolver.forVisionTasks(WASM_URL);
+        if (!active) return;
+        const opts = (delegate: 'GPU' | 'CPU') => ({
+          baseOptions: { modelAssetPath: MODEL_URL, delegate },
+          runningMode: 'VIDEO' as const,
+          numHands: 1,
+          minHandDetectionConfidence: 0.5,
+          minHandPresenceConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+        });
+        let lm: HandLandmarker;
         try {
-          landmarker = await HandLandmarker.createFromOptions(vision, {
-            baseOptions: {
-              modelAssetPath:
-                'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-              delegate: 'GPU',
-            },
-            runningMode: 'VIDEO',
-            numHands: 1,
-            minHandDetectionConfidence: 0.5,
-            minHandPresenceConfidence: 0.5,
-            minTrackingConfidence: 0.5,
-          });
-        } catch (gpuErr) {
-          console.warn('GPU delegate không khả dụng trên GPU này, chuyển sang CPU fallback:', gpuErr);
-          landmarker = await HandLandmarker.createFromOptions(vision, {
-            baseOptions: {
-              modelAssetPath:
-                'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-              delegate: 'CPU',
-            },
-            runningMode: 'VIDEO',
-            numHands: 1,
-            minHandDetectionConfidence: 0.5,
-            minHandPresenceConfidence: 0.5,
-            minTrackingConfidence: 0.5,
-          });
+          lm = await HandLandmarker.createFromOptions(vision, opts('GPU'));
+        } catch {
+          lm = await HandLandmarker.createFromOptions(vision, opts('CPU'));
         }
-        landmarkerRef.current = landmarker;
+        if (!active || engineRef.current) {
+          lm.close();
+          return;
+        }
+        landmarkerRef.current = lm;
 
-        // Tối ưu camera trước 2MP của TECLAST-P30 (640x480 / 30fps tiết kiệm pin & GPU)
         let stream: MediaStream;
         try {
           stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-              facingMode: 'user',
-              width: { ideal: 640, max: 1280 },
-              height: { ideal: 480, max: 720 },
-              frameRate: { ideal: 30, max: 60 },
-            },
+            video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } },
             audio: false,
           });
         } catch {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: 'user' },
-            audio: false,
-          });
+          stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
         }
-
-        if (!active || finishedRef.current) {
+        if (!active || engineRef.current) {
           stream.getTracks().forEach((t) => t.stop());
           return;
         }
-
-        mediaStreamRef.current = stream;
-
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.setAttribute('playsinline', 'true');
-          videoRef.current.setAttribute('webkit-playsinline', 'true');
-          videoRef.current.onloadedmetadata = () => {
-            if (!active || finishedRef.current) {
-              stopCamera();
-              return;
-            }
-            videoRef.current?.play().catch(() => undefined);
-            setCameraReady(true);
-            setIsLoading(false);
-            startGameLoop();
-          };
-        }
+        streamRef.current = stream;
+        const video = videoRef.current!;
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+          if (!active) return;
+          video.play().catch(() => undefined);
+          startEngine('camera');
+        };
       } catch (err) {
-        console.warn('Lỗi mở camera, chuyển sang chế độ chuột:', err);
-        setCameraError('Không mở được camera. Trò chơi đã chuyển sang chế độ phím bấm / chuột dự phòng.');
-        setIsLoading(false);
-        startGameLoop();
+        console.warn('Không mở được camera, chuyển sang nút bấm:', err);
+        if (!active) return;
+        setCameraError('Không mở được camera. Em chơi bằng nút bấm nhé!');
+        switchToButtons();
       }
     };
-
     init();
 
     return () => {
       active = false;
+      cancelAnimationFrame(rafRef.current);
       stopCamera();
     };
-  }, [demoMode, stopCamera]);
+  }, [startEngine, stopCamera, switchToButtons]);
 
-  const startGameLoop = () => {
-    let lastTime = performance.now();
-
-    const loop = (currentTime: number) => {
-      if (finishedRef.current) return;
-
-      const canvas = canvasRef.current;
-      const container = containerRef.current;
-      const engine = engineRef.current;
-      if (!canvas || !container || !engine) return;
-
-      const frameDt = Math.max(0, Math.min(MAX_FRAME_DELTA_MS, currentTime - lastTime));
-      lastTime = currentTime;
-
-      const logicalWidth = Math.max(1, container.clientWidth);
-      const logicalHeight = Math.max(1, container.clientHeight);
-      const pixelRatio = Math.min(MAX_CANVAS_PIXEL_RATIO, Math.max(1, window.devicePixelRatio || 1));
-      const targetWidth = Math.max(1, Math.floor(logicalWidth * pixelRatio));
-      const targetHeight = Math.max(1, Math.floor(logicalHeight * pixelRatio));
-
-      if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
-        canvas.width = targetWidth;
-        canvas.height = targetHeight;
-        pixelRatioRef.current = pixelRatio;
-        ctxRef.current = canvas.getContext('2d', {
-          alpha: true,
-          desynchronized: true,
-        } as CanvasRenderingContext2DSettings);
-        engine.resize(logicalWidth, logicalHeight);
-      }
-
-      const ctx = ctxRef.current || canvas.getContext('2d', { alpha: true, desynchronized: true } as CanvasRenderingContext2DSettings);
-      if (!ctx) return;
-      ctxRef.current = ctx;
-
-      // Cập nhật tay từ Camera MediaPipe (1 tay duy nhất)
-      const handLandmarks = demoMode || cameraError ? null : getCameraHandLandmarks();
-      if (!demoMode && !cameraError) {
-        engine.updateHand(handLandmarks);
-      }
-
-      let remainingDt = frameDt;
-      while (remainingDt > 0) {
-        const physicsDt = Math.min(MAX_PHYSICS_STEP_MS, remainingDt);
-        engine.update(physicsDt);
-        remainingDt -= physicsDt;
-      }
-
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.setTransform(pixelRatioRef.current, 0, 0, pixelRatioRef.current, 0, 0);
-      engine.draw(ctx);
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-
-      requestRef.current = requestAnimationFrame(loop);
-    };
-
-    requestRef.current = requestAnimationFrame(loop);
-  };
-
-  const getCameraHandLandmarks = (): LandmarkPoint[] | null => {
-    if (finishedRef.current) return null;
-    const video = videoRef.current;
-    const landmarker = landmarkerRef.current;
-    const container = containerRef.current;
-    if (!video || !landmarker || !container || video.readyState < 2) return cachedLandmarksRef.current;
-
-    const now = performance.now();
-    if (now - lastHandDetectMsRef.current < 28) return cachedLandmarksRef.current;
-    if (lastVideoTimeRef.current === video.currentTime) return cachedLandmarksRef.current;
-
-    lastVideoTimeRef.current = video.currentTime;
-    lastHandDetectMsRef.current = now;
-
-    let results: HandLandmarkerResult | null = null;
-    try {
-      results = landmarker.detectForVideo(video, now);
-    } catch {
-      return cachedLandmarksRef.current;
-    }
-
-    if (!results?.landmarks?.length) {
-      cachedLandmarksRef.current = null;
-      return null;
-    }
-
-    const cw = container.clientWidth;
-    const ch = container.clientHeight;
-    // Map 21 landmarks sang tọa độ canvas lật gương
-    const firstHand = results.landmarks[0];
-    const mapped: LandmarkPoint[] = firstHand.map((pt) => ({
-      x: (1 - pt.x) * cw,
-      y: pt.y * ch,
-      z: pt.z,
-    }));
-
-    cachedLandmarksRef.current = mapped;
-    return cachedLandmarksRef.current;
-  };
-
-  const currentPhase = engineState?.phase || 'COUNTDOWN';
-  const chantWord = engineState?.chantWord || 'OẲN';
-  const gapCountdown = Math.max(0, Math.ceil(engineState?.gapCountdown || 5));
-
-  // Nhận diện thế tay người chơi (thời gian thực lúc đếm ngược, hoặc chốt lúc phân định)
-  const activePlayerGesture =
-    currentPhase === 'SHOWDOWN' ? engineState?.playerChoice : engineState?.liveGesture;
-
-  // Chiêu thức bên máy: nhảy random liên tục lúc đếm ngược, chốt lúc showdown
-  const activeAIChoice =
-    currentPhase === 'SHOWDOWN' && engineState?.aiChoice
-      ? engineState.aiChoice
-      : engineState?.shufflingAIChoice || 'rock';
+  const char = getCharacterById(profile.characterId);
+  const s = state;
+  const phase = s?.phase ?? 'TURN_INTRO';
+  const mode = s?.inputMode ?? 'camera';
 
   return (
-    <div
-      ref={containerRef}
-      className="relative w-full h-full overflow-hidden select-none bg-[#030714]"
-      style={{ transform: 'none' }}
-    >
-      {/* Loading Overlay */}
-      {isLoading && (
-        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-[#050A1C]/95 backdrop-blur-md">
-          <img className="w-24 h-24 object-contain animate-bounce mb-3" src={BRAND_MASCOTS.cameraLoadingAnimated} alt="" />
-          <div className="w-12 h-12 border-4 border-[#00D89A] border-t-transparent rounded-full animate-spin mb-3" />
-          <p className="text-white font-black text-base sm:text-lg">ĐANG KẾT NỐI CAMERA & AR MODEL...</p>
-          <span className="text-[#00D89A] text-xs font-bold mt-1">Sử dụng Skeleton AR để xét Kéo - Búa - Bao</span>
-        </div>
-      )}
+    <div ref={containerRef} className="stage relative w-full h-full overflow-hidden select-none">
+      <div className="stage-deco" aria-hidden="true">
+        <span /><span /><span /><span />
+      </div>
 
-      {/* Camera Error warning */}
-      {cameraError && (
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 px-4 py-2.5 rounded-2xl bg-rose-500/25 border border-rose-500 text-rose-200 text-xs font-bold shadow-lg max-w-lg text-center backdrop-blur-md">
-          <span>⚠️ {cameraError}. Vui lòng cho phép quyền Camera để trải nghiệm Oẳn Tù Xì AR.</span>
-        </div>
-      )}
-
-      {/* Video Webcam Stream - Nền mờ phía sau */}
+      {/* Luồng camera chỉ để máy đọc khớp tay. Không hiện hình học sinh lên màn hình (C-108). */}
       <video
         ref={videoRef}
         playsInline
         autoPlay
         muted
         disablePictureInPicture
-        className={`absolute inset-0 w-full h-full -scale-x-100 object-cover opacity-40 mix-blend-screen pointer-events-none ${
-          cameraReady ? '' : 'hidden'
-        }`}
+        className="absolute w-px h-px opacity-0 pointer-events-none"
+        aria-hidden="true"
       />
 
-      {/* Main Canvas rendering AR Hand Skeleton & VFX */}
-      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none z-10" />
+      {s && (
+        <div className="absolute inset-0 flex flex-col gap-2 sm:gap-3 p-2 sm:p-4">
+          <PhaseSteps phase={phase} />
 
-      {/* ============================================================ */}
-      {/* POPUP: TẠM DỪNG KHI KHÔNG PHÁT HIỆN BÀN TAY                   */}
-      {/* ============================================================ */}
-      {engineState?.isHandMissing && currentPhase === 'COUNTDOWN' && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-black/80 backdrop-blur-md animate-modal-dialog pointer-events-auto">
-          <div className="relative max-w-lg w-full p-5 sm:p-7 rounded-3xl bg-gradient-to-b from-[#0f1d46] to-[#070e24] border-2 border-[#38BDF8] shadow-[0_0_50px_rgba(56,189,248,0.4)] flex flex-col items-center text-center gap-3 sm:gap-4 overflow-hidden">
-            {/* Glowing Icon Hand with ripple */}
-            <div className="relative flex items-center justify-center">
-              <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full bg-[#38BDF8]/20 border-2 border-[#38BDF8] flex items-center justify-center shadow-[0_0_30px_rgba(56,189,248,0.5)] animate-pulse">
-                <span className="text-4xl sm:text-5xl transform -rotate-12 select-none">🖐️</span>
-              </div>
-              <span className="absolute inset-0 rounded-full border border-[#00D89A] animate-ping opacity-75" />
+          <div className="flex-1 min-h-0 grid grid-cols-2 sm:grid-cols-[1fr_minmax(230px,0.9fr)_1fr] gap-2 sm:gap-4 items-stretch">
+            <PlayerCard state={s} char={char} name={profile.groupName} previewRef={previewCanvasRef} />
+            <div className="col-span-2 sm:col-span-1 order-first sm:order-none flex flex-col items-center justify-center text-center min-h-0">
+              <CenterStage state={s} onNext={() => engineRef.current?.skipReveal()} />
             </div>
-
-            {/* Yêu cầu: "Em hãy đưa tay trước camera để chơi" */}
-            <div className="flex flex-col gap-1.5">
-              <span className="px-3 py-0.5 rounded-full bg-[#F59E0B]/20 border border-[#F59E0B]/50 text-[#F59E0B] text-xs font-black uppercase tracking-wider mx-auto">
-                ⏸️ TRẬN ĐẤU ĐANG TẠM DỪNG
-              </span>
-              <h2 className="text-xl sm:text-2xl md:text-3xl font-black text-white leading-tight mt-1">
-                Em hãy đưa tay trước camera để chơi
-              </h2>
-              <p className="text-xs sm:text-sm text-white/80 leading-relaxed max-w-sm mx-auto">
-                Giơ <b>1 bàn tay</b> (nắm ✊, xòe ✋, hoặc kéo ✌️) vào giữa khung hình camera. Trận đấu sẽ <b>tự động tiếp tục</b> ngay lập tức!
-              </p>
-            </div>
-
-            {/* Radar scanner badge */}
-            <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-white/5 border border-white/10 text-xs text-[#38BDF8] font-bold">
-              <span className="w-2.5 h-2.5 rounded-full bg-[#38BDF8] animate-ping" />
-              <span>Đang quét tìm bàn tay của em...</span>
-            </div>
+            <BotCard state={s} />
           </div>
+
+          <BottomBar
+            mode={mode}
+            phase={phase}
+            liveGesture={s.liveGesture}
+            onChoose={(c) => engineRef.current?.chooseByButton(c)}
+            onSwitchToButtons={switchToButtons}
+          />
         </div>
       )}
 
-      {/* ============================================================ */}
-      {/* ARENA INTERACTION LAYER                                      */}
-      {/* ============================================================ */}
-      <div className="absolute inset-0 z-20 flex flex-col justify-between p-2.5 sm:p-4 pointer-events-none">
-        {/* Top Matchup Header: Hiển thị gọn trên màn hình lớn */}
-        <div className="hidden md:flex items-center justify-between gap-3 max-w-5xl mx-auto w-full px-2">
-          {/* Player Card */}
-          <div className="flex items-center gap-2.5 p-2 rounded-2xl bg-[#08122c]/85 border border-[#38BDF8]/40 shadow-lg backdrop-blur-md">
-            <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-gradient-to-br from-[#4C6DF0]/30 to-[#00D89A]/30 border border-[#00D89A] p-0.5 shrink-0">
-              <CharacterAvatar character={selectedChar} />
-            </div>
-            <div className="flex flex-col">
-              <span className="text-[8.5px] font-bold text-white/50 uppercase tracking-wider">Người Chơi</span>
-              <span className="text-xs sm:text-sm font-black text-white truncate max-w-[130px]">
-                {profile.groupName}
-              </span>
-              <span className="text-[9.5px] text-[#00D89A] font-bold">Lớp: {profile.className}</span>
-            </div>
-          </div>
+      {/* Lớp hiệu ứng pháo giấy, vòng sóng */}
+      <canvas ref={fxCanvasRef} className="absolute inset-0 w-full h-full pointer-events-none z-30" />
 
-          {/* Central Round/Turn Pill */}
-          <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-black/60 border border-white/15 backdrop-blur-md text-[11px] font-black uppercase text-white/80">
-            <span className="text-[#38BDF8]">VÒNG {engineState?.round || 1}/2</span>
-            <span>•</span>
-            <span className="text-[#FBBF24]">LƯỢT {engineState?.turn || 1}/5</span>
-          </div>
+      {/* Lóe sáng như bấm máy ảnh lúc CHỐT */}
+      {phase === 'LOCKED' && <div key={`flash-${s?.round}-${s?.turn}`} className="absolute inset-0 z-30 bg-white anim-flash pointer-events-none" />}
 
-          {/* AI Opponent Card */}
-          <div className="flex items-center gap-2.5 p-2 rounded-2xl bg-[#08122c]/85 border border-[#EF4444]/40 shadow-lg backdrop-blur-md">
-            <div className="flex flex-col items-end">
-              <span className="text-[8.5px] font-bold text-white/50 uppercase tracking-wider">Đối Thủ</span>
-              <span className="text-xs sm:text-sm font-black text-[#EF4444]">MANABIE AI</span>
-              <span className="text-[9.5px] text-white/60 font-semibold">Tự động ngẫu nhiên</span>
-            </div>
-            <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-gradient-to-br from-[#EF4444]/30 to-[#F59E0B]/30 border border-[#EF4444] flex items-center justify-center text-lg shrink-0">
-              🤖
-            </div>
-          </div>
+      {s && phase === 'TURN_INTRO' && <TurnIntroOverlay state={s} />}
+      {s && phase === 'ROUND_GAP' && <RoundGapOverlay state={s} onStart={() => engineRef.current?.startRound2()} />}
+
+      {cameraError && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 chip text-base sm:text-lg py-1.5 px-4 anim-slide-up" style={{ ['--c' as string]: 'var(--lose)' }}>
+          📷 {cameraError}
         </div>
+      )}
 
-        {/* Center Arena Clash Zone: Bên Người vs Bên Máy */}
-        <div className="my-auto max-w-5xl lg:max-w-6xl mx-auto w-full flex items-center justify-between gap-2 sm:gap-6 md:gap-10 px-2 sm:px-4">
-          {/* ======================================================== */}
-          {/* 1. BÊN NGƯỜI (Player Side - Nhận diện AR thời gian thực) */}
-          {/* ======================================================== */}
-          <div className="flex-1 flex flex-col items-center">
-            <div className="flex items-center gap-1.5 px-2.5 py-0.5 sm:px-3 sm:py-1 rounded-full bg-black/60 border border-[#38BDF8]/40 mb-1 sm:mb-2 backdrop-blur-md">
-              <span className="text-[9px] sm:text-xs font-black uppercase text-[#38BDF8] tracking-wider truncate">
-                🖐️ BẠN (AR)
-              </span>
-            </div>
+      {loading && (
+        <div className="absolute inset-0 z-50 stage flex flex-col items-center justify-center gap-3 p-6 text-center">
+          <img className="w-32 h-32 object-contain anim-bob" src={BRAND_MASCOTS.cameraLoadingAnimated} alt="" />
+          <p className="title text-3xl sm:text-4xl">Đang mở camera...</p>
+          <p className="text-lg text-[var(--ink-soft)] max-w-md">Nếu trình duyệt hỏi, em bấm <b>Cho phép</b> để máy nhìn thấy bàn tay.</p>
+          <div className="w-12 h-12 rounded-full border-[6px] border-[var(--sky)] border-t-transparent animate-spin" />
+          <button type="button" className="btn btn-white btn-sm mt-2" onClick={switchToButtons}>
+            🖱️ Không có camera? Chơi bằng nút bấm
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
-            {/* Khung hiển thị chiêu thức: Lắc lên xuống nhẹ (animate-rps-bob-player) */}
+// =============================================================================
+// THANH 4 BƯỚC CỦA MỘT LƯỢT
+// =============================================================================
+const STEPS = [
+  { icon: '✋', label: 'Giơ tay' },
+  { icon: '🎵', label: 'Oẳn tù xì' },
+  { icon: '🔒', label: 'Chốt tay' },
+  { icon: '🏆', label: 'Kết quả' },
+];
+
+function stepIndex(phase: GamePhase): number {
+  if (phase === 'CHANT' || phase === 'SHOW') return 1;
+  if (phase === 'LOCKED' || phase === 'RETRY') return 2;
+  if (phase === 'REVEAL') return 3;
+  return 0;
+}
+
+function PhaseSteps({ phase }: { phase: GamePhase }) {
+  const cur = stepIndex(phase);
+  return (
+    <div className="hidden sm:flex items-center justify-center gap-1.5 shrink-0">
+      {STEPS.map((st, i) => {
+        const done = i < cur;
+        const active = i === cur;
+        const bad = active && phase === 'RETRY';
+        const bg = bad ? 'var(--lose)' : active ? 'var(--sky)' : done ? 'var(--win)' : '#fff';
+        return (
+          <div key={st.label} className="flex items-center gap-1.5">
             <div
-              className={`relative w-32 h-44 xs:w-36 xs:h-48 sm:w-48 sm:h-60 md:w-56 md:h-72 lg:w-64 lg:h-80 rounded-2xl sm:rounded-3xl p-3 sm:p-4 flex flex-col items-center justify-center border-2 transition-all duration-200 ${
-                activePlayerGesture
-                  ? 'animate-rps-bob-player shadow-2xl backdrop-blur-md'
-                  : 'border-dashed border-white/20 bg-white/5 animate-pulse'
+              className={`flex items-center gap-1.5 rounded-full px-3 lg:px-4 py-1 font-extrabold transition-all ${
+                active ? 'text-white text-lg lg:text-xl scale-105' : done ? 'text-white text-base' : 'text-[var(--ink-soft)] text-base border-[3px] border-[var(--line)]'
               }`}
-              style={{
-                borderColor: activePlayerGesture
-                  ? RPS_CHOICES[activePlayerGesture].borderColor
-                  : 'rgba(255,255,255,0.2)',
-                backgroundColor: activePlayerGesture
-                  ? RPS_CHOICES[activePlayerGesture].bgColor
-                  : 'rgba(0,0,0,0.4)',
-                boxShadow: activePlayerGesture
-                  ? `0 0 35px ${RPS_CHOICES[activePlayerGesture].borderColor}40`
-                  : 'none',
-              }}
+              style={{ background: bg, boxShadow: active ? '0 4px 0 rgba(0,0,0,.18)' : undefined }}
             >
-              {activePlayerGesture ? (
-                <>
-                  <img
-                    src={RPS_CHOICES[activePlayerGesture].image}
-                    alt={activePlayerGesture}
-                    className="w-20 h-20 xs:w-24 xs:h-24 sm:w-32 sm:h-32 md:w-40 md:h-40 lg:w-44 lg:h-44 object-contain filter drop-shadow-[0_8px_16px_rgba(0,0,0,0.5)] transform -scale-x-100"
-                  />
-                  <span className="text-xs xs:text-sm sm:text-lg md:text-xl lg:text-2xl font-black text-white mt-1 uppercase tracking-wider">
-                    {RPS_CHOICES[activePlayerGesture].emoji} {RPS_CHOICES[activePlayerGesture].vietnameseName}
-                  </span>
-                  <span className="text-[8px] sm:text-[9px] text-[#00D89A] font-bold">✓ Nhận diện tay</span>
-                </>
-              ) : (
-                <div className="flex flex-col items-center text-center p-1 sm:p-2">
-                  <span className="text-2xl sm:text-5xl opacity-40 mb-1">✋</span>
-                  <span className="text-[9px] sm:text-xs font-bold text-white/60 leading-tight">
-                    Giơ 1 tay trước cam<br />
-                    (✊ / ✌️ / ✋)
-                  </span>
-                </div>
-              )}
+              <span className="w-6 h-6 rounded-full bg-white/25 flex items-center justify-center text-sm">{done ? '✓' : i + 1}</span>
+              <span>{st.icon}</span>
+              <span>{st.label}</span>
             </div>
+            {i < STEPS.length - 1 && <span className={`text-xl font-extrabold ${i < cur ? 'text-[var(--win)]' : 'text-[var(--line)]'}`}>›</span>}
           </div>
+        );
+      })}
+    </div>
+  );
+}
 
-          {/* ======================================================== */}
-          {/* 2. KHU VỰC TRUNG TÂM (Chant OẲN - TÙ - XÌ & Kết quả)      */}
-          {/* ======================================================== */}
-          <div className="shrink-0 flex flex-col items-center justify-center text-center min-w-[110px] xs:min-w-[140px] sm:min-w-[200px] md:min-w-[240px]">
-            {currentPhase === 'COUNTDOWN' && (
-              <div className="flex flex-col items-center justify-center">
-                <span className="text-[9px] sm:text-xs font-black tracking-widest text-white/50 uppercase mb-0.5">
-                  ĐẾM NHỊP
-                </span>
+// =============================================================================
+// THẺ NGƯỜI CHƠI
+// =============================================================================
+function PlayerCard({
+  state: s,
+  char,
+  name,
+  previewRef,
+}: {
+  state: GameState;
+  char: ReturnType<typeof getCharacterById>;
+  name: string;
+  previewRef: RefObject<HTMLCanvasElement | null>;
+}) {
+  const locked = (s.phase === 'LOCKED' || s.phase === 'REVEAL') && s.playerChoice;
+  const camera = s.inputMode === 'camera';
+  const live = s.liveGesture;
 
-                {/* Chữ OẲN - TÙ - XÌ to nổi bật */}
-                <div
-                  className={`font-black font-mono leading-none tracking-wider text-5xl xs:text-6xl sm:text-7xl md:text-8xl lg:text-9xl drop-shadow-[0_0_45px_rgba(245,158,11,0.9)] transition-all duration-150 ${
-                    chantWord === 'OẲN'
-                      ? 'text-[#F59E0B] scale-100'
-                      : chantWord === 'TÙ'
-                      ? 'text-[#38BDF8] scale-105'
-                      : 'text-[#EF4444] scale-115'
-                  }`}
-                >
-                  {chantWord}
-                </div>
+  let img = HAND_WAITING_IMAGE;
+  let imgClass = 'anim-bob';
+  let caption = 'Chuẩn bị nhé!';
+  let color = 'var(--sky)';
 
-                <div className="mt-1 sm:mt-2 text-[9px] sm:text-xs font-bold text-white/70 font-mono">
-                  {Math.max(0, engineState?.countdownSeconds || 0).toFixed(1)}s
-                </div>
-              </div>
-            )}
+  if (locked) {
+    img = RPS_CHOICES[s.playerChoice!].image;
+    imgClass = s.phase === 'LOCKED' ? 'anim-pop' : '';
+    caption = RPS_CHOICES[s.playerChoice!].vietnameseName;
+    color = RPS_CHOICES[s.playerChoice!].color;
+  } else if (s.phase === 'WAIT_HAND') {
+    caption = 'Giơ 1 bàn tay lên';
+  } else if (s.phase === 'CHANT') {
+    if (camera || !live) {
+      img = RPS_CHOICES.rock.image;
+      imgClass = 'anim-wiggle';
+      caption = camera ? 'Lắc nắm tay theo nhịp' : 'Bấm chọn tay ở dưới';
+    } else {
+      img = RPS_CHOICES[live].image;
+      imgClass = '';
+      caption = `Em chọn ${RPS_CHOICES[live].label}`;
+      color = RPS_CHOICES[live].color;
+    }
+  } else if (s.phase === 'SHOW') {
+    if (live) {
+      img = RPS_CHOICES[live].image;
+      imgClass = '';
+      caption = RPS_CHOICES[live].vietnameseName;
+      color = RPS_CHOICES[live].color;
+    } else {
+      caption = camera ? 'Ra tay đi em!' : 'Bấm chọn nhanh!';
+    }
+  } else if (s.phase === 'RETRY') {
+    caption = 'Chưa chốt được';
+    color = 'var(--lose)';
+  }
 
-            {currentPhase === 'SHOWDOWN' && (
-              <div className="flex flex-col items-center gap-1 sm:gap-2 animate-banner-pop">
-                <span
-                  className={`px-2.5 py-0.5 sm:px-3.5 sm:py-1 rounded-full text-[10px] sm:text-sm font-black uppercase tracking-wider ${
-                    engineState?.lastResult === 'win'
-                      ? 'bg-[#10B981] text-[#022318] shadow-[0_0_20px_rgba(16,185,129,0.7)]'
-                      : engineState?.lastResult === 'draw'
-                      ? 'bg-[#F59E0B] text-[#022318] shadow-[0_0_20px_rgba(245,158,11,0.7)]'
-                      : 'bg-[#EF4444] text-white shadow-[0_0_20px_rgba(239,68,68,0.7)]'
-                  }`}
-                >
-                  {engineState?.resultMessage}
-                </span>
-                <span className="text-base sm:text-2xl font-black font-mono text-white/40 italic">VS</span>
-                <span className="text-[9px] sm:text-xs text-white/90 font-bold max-w-[130px] sm:max-w-[170px] leading-tight">
-                  {engineState?.resultDetail}
-                </span>
-              </div>
-            )}
+  return (
+    <div className="card relative flex flex-col min-h-0 overflow-hidden" style={{ ['--c' as string]: color, ['--cs' as string]: color }}>
+      <div className="flex items-center gap-2 px-3 pt-2 shrink-0">
+        <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-2xl bg-[var(--sky-soft)] p-0.5 shrink-0">
+          <CharacterAvatar character={char} />
+        </div>
+        <div className="flex flex-col min-w-0 leading-tight">
+          <span className="chip text-sm w-max" style={{ ['--c' as string]: 'var(--sky)' }}>BẠN</span>
+          <span className="font-extrabold text-base sm:text-lg truncate">{name}</span>
+        </div>
+      </div>
 
-            {currentPhase === 'ROUND_GAP' && (
-              <div className="flex flex-col items-center gap-1 p-2 sm:p-3 rounded-2xl bg-[#09153a]/95 border-2 border-[#00D89A] shadow-[0_0_40px_rgba(0,216,154,0.4)] animate-modal-dialog">
-                <span className="text-[8px] sm:text-[9px] font-black uppercase text-[#00D89A]">NGHỈ CHUYỂN VÒNG</span>
-                <span className="text-2xl sm:text-4xl font-black font-mono text-[#00D89A] animate-pulse">
-                  {gapCountdown}s
-                </span>
-                <span className="text-[9px] text-white/80 font-bold">Người chơi 2 chuẩn bị</span>
-              </div>
-            )}
+      <div className="relative flex-1 min-h-0 flex flex-col items-center justify-center px-2">
+        <img
+          key={`${img}-${imgClass}`}
+          src={img}
+          alt={caption}
+          className={`h-[54%] max-h-60 w-auto object-contain drop-shadow-[0_10px_0_rgba(35,51,92,0.12)] ${imgClass}`}
+        />
+        {locked && (
+          <span className="chip text-base sm:text-lg mt-1 anim-stamp" style={{ ['--c' as string]: 'var(--ink)' }}>
+            🔒 ĐÃ CHỐT
+          </span>
+        )}
+        <span
+          className={`title mt-1 text-center ${caption.length > 9 ? 'text-xl sm:text-2xl lg:text-3xl' : 'text-2xl sm:text-3xl lg:text-4xl'}`}
+          style={{ color }}
+        >
+          {caption}
+        </span>
+        {s.phase === 'SHOW' && (
+          <span className="mt-1 text-lg font-extrabold text-[var(--ink-soft)]">Giữ yên tay nhé!</span>
+        )}
+      </div>
+
+      {camera && (
+        <div className="absolute right-2 top-2 w-[34%] max-w-40 rounded-2xl overflow-hidden border-[3px] border-[var(--sky)] bg-white">
+          <canvas ref={previewRef} className="block w-full aspect-[4/3]" />
+          <div className="text-center text-xs sm:text-sm font-extrabold py-0.5 bg-[var(--sky)] text-white truncate px-1">
+            {locked
+              ? `🔒 Chốt: ${RPS_CHOICES[s.playerChoice!].label}`
+              : s.handVisible
+              ? `👀 Thấy: ${live ? RPS_CHOICES[live].label : '...'}`
+              : 'Chưa thấy tay'}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
-          {/* ======================================================== */}
-          {/* 3. BÊN MÁY (AI Side - Nhảy random trong lúc đếm ngược)    */}
-          {/* ======================================================== */}
-          <div className="flex-1 flex flex-col items-center">
-            <div className="flex items-center gap-1 px-2.5 py-0.5 sm:px-3 sm:py-1 rounded-full bg-black/60 border border-[#EF4444]/40 mb-1 sm:mb-2 backdrop-blur-md">
-              <span className="text-[9px] sm:text-xs font-black uppercase text-[#EF4444] tracking-wider truncate">
-                🤖 AI
-              </span>
-              <span
-                className={`px-1 py-0.2 rounded text-[8px] sm:text-[9px] font-black uppercase tracking-wider ${
-                  (engineState?.difficulty || difficulty) === 'hard'
-                    ? 'bg-rose-500/25 border border-rose-500/50 text-rose-300'
-                    : (engineState?.difficulty || difficulty) === 'easy'
-                    ? 'bg-emerald-500/25 border border-emerald-500/50 text-emerald-300'
-                    : 'bg-sky-500/25 border border-sky-500/50 text-sky-300'
-                }`}
-              >
-                {(engineState?.difficulty || difficulty) === 'hard'
-                  ? 'Khó'
-                  : (engineState?.difficulty || difficulty) === 'easy'
-                  ? 'Dễ'
-                  : 'Thường'}
-              </span>
-            </div>
+// =============================================================================
+// THẺ MÁY
+// =============================================================================
+function BotCard({ state: s }: { state: GameState }) {
+  const revealed = s.phase === 'REVEAL' && s.aiChoice;
+  const face = revealed
+    ? s.lastResult === 'win'
+      ? BOT_IMAGES.lose
+      : s.lastResult === 'lose'
+      ? BOT_IMAGES.win
+      : BOT_IMAGES.draw
+    : s.phase === 'CHANT' || s.phase === 'SHOW'
+    ? BOT_IMAGES.shuffle
+    : BOT_IMAGES.wait;
+  const color = revealed ? RPS_CHOICES[s.aiChoice!].color : 'var(--grape)';
 
-            {/* AI Status Label - Trừu tượng hóa quá trình học */}
-            <div className="mb-0.5 sm:mb-1 text-[9px] text-white/60 font-semibold tracking-wide flex items-center gap-1 truncate max-w-[120px]">
-              <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#38BDF8]" />
-              <span className="truncate">{engineState?.aiStatusLabel || 'Quan sát'}</span>
-            </div>
+  return (
+    <div className="card relative flex flex-col min-h-0 overflow-hidden" style={{ ['--c' as string]: color, ['--cs' as string]: color }}>
+      <div className="flex items-center justify-end gap-2 px-3 pt-2 shrink-0">
+        <div className="flex flex-col items-end leading-tight">
+          <span className="chip text-sm" style={{ ['--c' as string]: 'var(--grape)' }}>MÁY</span>
+          <span className="font-extrabold text-base sm:text-lg">
+            {s.difficulty === 'easy' ? 'Mức dễ' : s.difficulty === 'hard' ? 'Mức khó' : 'Mức vừa'}
+          </span>
+        </div>
+        <img key={face} src={face} alt="" className="w-12 h-14 sm:w-14 sm:h-16 object-contain anim-pop" />
+      </div>
 
-            {/* Khung hiển thị chiêu thức máy: Lắc lên xuống nhẹ (animate-rps-bob-ai) */}
+      <div className="relative flex-1 min-h-0 flex flex-col items-center justify-center px-2">
+        {revealed ? (
+          <>
+            <img
+              key={`ai-${s.round}-${s.turn}`}
+              src={RPS_CHOICES[s.aiChoice!].image}
+              alt={RPS_CHOICES[s.aiChoice!].label}
+              className="h-[54%] max-h-60 w-auto object-contain anim-flip -scale-x-100"
+            />
+            <span className="title text-2xl sm:text-3xl lg:text-4xl mt-1" style={{ color }}>
+              {RPS_CHOICES[s.aiChoice!].vietnameseName}
+            </span>
+          </>
+        ) : (
+          <>
             <div
-              className={`relative w-32 h-44 xs:w-36 xs:h-48 sm:w-48 sm:h-60 md:w-56 md:h-72 lg:w-64 lg:h-80 rounded-2xl sm:rounded-3xl p-3 sm:p-4 flex flex-col items-center justify-center border-2 transition-all duration-200 animate-rps-bob-ai shadow-2xl backdrop-blur-md`}
-              style={{
-                borderColor: RPS_CHOICES[activeAIChoice].borderColor,
-                backgroundColor: RPS_CHOICES[activeAIChoice].bgColor,
-                boxShadow: `0 0 35px ${RPS_CHOICES[activeAIChoice].borderColor}40`,
-              }}
+              className={`relative h-[54%] max-h-60 aspect-[3/4] rounded-3xl bg-[var(--grape)] flex items-center justify-center shadow-[0_8px_0_var(--grape-dark)] ${
+                s.phase === 'CHANT' || s.phase === 'SHOW' ? 'anim-shake' : ''
+              }`}
             >
-              <img
-                src={RPS_CHOICES[activeAIChoice].image}
-                alt={activeAIChoice}
-                className="w-20 h-20 xs:w-24 xs:h-24 sm:w-32 sm:h-32 md:w-40 md:h-40 lg:w-44 lg:h-44 object-contain filter drop-shadow-[0_8px_16px_rgba(0,0,0,0.5)]"
-              />
-              <span className="text-[11px] sm:text-base font-black text-white mt-1 uppercase tracking-wider">
-                {currentPhase === 'SHOWDOWN'
-                  ? `${RPS_CHOICES[activeAIChoice].emoji} ${RPS_CHOICES[activeAIChoice].vietnameseName}`
-                  : '🎲 ĐANG CHỌN...'}
-              </span>
-              <span className="text-[8px] sm:text-[9px] text-[#F59E0B] font-bold">
-                {currentPhase === 'SHOWDOWN' ? '✓ Đã chốt' : '⚡ Random'}
-              </span>
+              <div className="absolute inset-3 rounded-2xl border-4 border-dashed border-white/50" />
+              <span className="title text-white text-7xl sm:text-8xl">?</span>
             </div>
-          </div>
-        </div>
+            <span className="mt-2 text-lg sm:text-xl font-extrabold text-[var(--grape)] text-center leading-tight">
+              Máy đã chọn xong
+              <br />
+              <span className="text-[var(--ink-soft)] text-base">và úp bài, không nhìn trộm</span>
+            </span>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
 
-        {/* Bottom Mascot Coach Guide - Chơi thuần AR */}
-        <div className="max-w-5xl mx-auto w-full flex items-center justify-center">
-          <div className="flex items-center gap-2 sm:gap-3 px-3 py-1.5 sm:px-4 sm:py-2 rounded-2xl bg-black/70 border border-white/10 backdrop-blur-md max-w-md">
-            <img className="w-7 h-7 sm:w-9 sm:h-9 object-contain shrink-0" src={BRAND_MASCOTS.explore} alt="" />
-            <div className="flex flex-col text-left">
-              <span className="text-[9px] font-bold text-[#00D89A] uppercase tracking-wider">
-                Quy Tắc Oẳn Tù Xì AR (1 Bàn Tay)
-              </span>
-              <p className="text-[10px] sm:text-xs text-white/80 leading-snug">
-                ✊ <b>Búa đập Kéo</b> • ✌️ <b>Kéo cắt Bao</b> • ✋ <b>Bao bọc Búa</b>
-              </p>
+// =============================================================================
+// GIỮA SÂN: NHỊP HÔ, CHỐT, KẾT QUẢ
+// =============================================================================
+const BEATS = ['OẲN', 'TÙ', 'XÌ', 'CHỐT'] as const;
+
+function BeatTrack({ state: s }: { state: GameState }) {
+  const idx =
+    s.phase === 'CHANT' ? (s.chantWord === 'OẲN' ? 0 : 1) : s.phase === 'SHOW' ? 2 : s.phase === 'LOCKED' || s.phase === 'REVEAL' ? 3 : -1;
+  const colors = ['var(--rock)', 'var(--sky)', 'var(--lose)', 'var(--ink)'];
+  return (
+    <div className="flex items-center justify-center gap-1 sm:gap-1.5">
+      {BEATS.map((b, i) => (
+        <div key={b} className="flex items-center gap-1 sm:gap-1.5">
+          <div
+            className={`relative rounded-full flex items-center justify-center font-extrabold text-white transition-all ${
+              i === idx ? 'w-14 h-14 sm:w-16 sm:h-16 text-base sm:text-lg' : 'w-11 h-11 sm:w-12 sm:h-12 text-xs sm:text-sm'
+            }`}
+            style={{ background: i <= idx ? colors[i] : '#e9dfcc', boxShadow: i === idx ? '0 4px 0 rgba(0,0,0,.2)' : undefined }}
+          >
+            {i === 3 ? '🔒' : b}
+            {i === 2 && s.phase === 'SHOW' && (
+              <svg className="absolute -inset-1.5 w-[calc(100%+12px)] h-[calc(100%+12px)] -rotate-90" viewBox="0 0 40 40">
+                <circle cx="20" cy="20" r="18" fill="none" stroke="var(--lose)" strokeWidth="3" strokeLinecap="round"
+                  strokeDasharray={113} strokeDashoffset={113 * s.phaseProgress} />
+              </svg>
+            )}
+          </div>
+          {i < 3 && <span className="w-3 sm:w-5 h-1.5 rounded-full" style={{ background: i < idx ? colors[i + 1] : '#e9dfcc' }} />}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CenterStage({ state: s, onNext }: { state: GameState; onNext: () => void }) {
+  const big = 'title outline-text text-[clamp(3.6rem,9vw,8rem)]';
+
+  if (s.phase === 'WAIT_HAND') {
+    return (
+      <div className="flex flex-col items-center gap-2 anim-fade">
+        <span className="text-[clamp(3rem,7vw,6rem)] anim-bob">✋</span>
+        <span className="title text-[clamp(1.8rem,3.4vw,3rem)] text-[var(--sky)]">Giơ tay lên nào!</span>
+        <span className="text-lg sm:text-xl text-[var(--ink-soft)] max-w-xs">Đưa 1 bàn tay vào trước camera, cách khoảng 1 gang tay đến 1 cánh tay.</span>
+      </div>
+    );
+  }
+
+  if (s.phase === 'CHANT' || s.phase === 'SHOW') {
+    const word = s.chantWord === 'XÌ' ? 'XÌ!' : s.chantWord;
+    const color = s.chantWord === 'OẲN' ? 'var(--rock)' : s.chantWord === 'TÙ' ? 'var(--sky)' : 'var(--lose)';
+    return (
+      <div className="flex flex-col items-center gap-2 sm:gap-3">
+        <span key={word} className={`${big} anim-beat`} style={{ color }}>
+          {word}
+        </span>
+        <span className="text-xl sm:text-2xl font-extrabold text-[var(--ink)]">
+          {s.phase === 'SHOW' ? (s.inputMode === 'camera' ? 'Ra tay và giữ yên!' : 'Bấm chọn ngay!') : 'Cùng hô theo nhịp'}
+        </span>
+        <BeatTrack state={s} />
+        {s.phase === 'SHOW' && (
+          <div className="w-48 sm:w-60">
+            <div className="timebar" style={{ ['--c' as string]: 'var(--lose)' }}>
+              <i style={{ width: `${(1 - s.phaseProgress) * 100}%` }} />
             </div>
+            <span className="text-sm font-bold text-[var(--ink-soft)]">Hết thanh đỏ là máy chốt</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (s.phase === 'LOCKED') {
+    return (
+      <div className="flex flex-col items-center gap-3">
+        <span className={`${big} anim-stamp text-[var(--ink)]`}>CHỐT!</span>
+        <span className="text-xl sm:text-2xl font-extrabold">Máy đã khóa tay của em 🔒</span>
+        <BeatTrack state={s} />
+        <span className="text-lg font-bold text-[var(--grape)]">Chuẩn bị lật bài của máy...</span>
+      </div>
+    );
+  }
+
+  if (s.phase === 'REVEAL') {
+    const c = s.lastResult === 'win' ? 'var(--win)' : s.lastResult === 'lose' ? 'var(--lose)' : 'var(--draw)';
+    const icon = s.lastResult === 'win' ? '🎉' : s.lastResult === 'lose' ? '🤖' : '🤝';
+    const nextLabel = s.turn < s.maxTurnsPerRound ? `Lượt ${s.turn + 1}` : s.round === 1 ? 'Hết vòng 1' : 'Xem tổng kết';
+    return (
+      <div className="flex flex-col items-center gap-2 sm:gap-3 w-full max-w-sm">
+        <span className="text-5xl sm:text-6xl anim-pop">{icon}</span>
+        <span className="chip title text-[clamp(1.8rem,3.6vw,3.2rem)] px-6 py-1 anim-pop" style={{ ['--c' as string]: c, boxShadow: '0 6px 0 rgba(0,0,0,.18)' }}>
+          {s.resultMessage}
+        </span>
+        <span className="title text-[clamp(1.5rem,2.6vw,2.4rem)] anim-slide-up">{s.resultDetail}</span>
+        <span className="text-xl font-extrabold anim-slide-up" style={{ color: s.lastScoreGain ? 'var(--win)' : 'var(--ink-soft)' }}>
+          {s.lastScoreGain ? `+${s.lastScoreGain} điểm ⭐` : 'Không có điểm'}
+        </span>
+        <div className="w-full px-4">
+          <div className="timebar" style={{ ['--c' as string]: 'var(--sky)' }}>
+            <i style={{ width: `${s.phaseProgress * 100}%` }} />
           </div>
         </div>
+        <button type="button" className="btn btn-sm" onClick={onNext}>
+          {nextLabel} ▶
+        </button>
+      </div>
+    );
+  }
+
+  if (s.phase === 'RETRY') {
+    return (
+      <div className="flex flex-col items-center gap-2 anim-pop">
+        <span className="text-6xl">🙈</span>
+        <span className="title text-[clamp(1.8rem,3.4vw,3rem)] text-[var(--lose)]">Chơi lại lượt này</span>
+        <span className="text-xl font-bold max-w-xs">{s.retryReason}</span>
+        <span className="text-lg text-[var(--ink-soft)] max-w-xs">Lần này nhớ ra tay đúng lúc <b>XÌ</b> và giữ yên nhé!</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <span className="text-xl font-extrabold text-[var(--ink-soft)]">Vòng {s.round}</span>
+      <span className="title text-[clamp(3rem,7vw,6rem)] text-[var(--sky)]">Lượt {s.turn}</span>
+    </div>
+  );
+}
+
+// =============================================================================
+// THANH DƯỚI: LUẬT CHƠI HOẶC NÚT BẤM
+// =============================================================================
+function BottomBar({
+  mode,
+  phase,
+  liveGesture,
+  onChoose,
+  onSwitchToButtons,
+}: {
+  mode: InputMode;
+  phase: GamePhase;
+  liveGesture: RPSChoice | null;
+  onChoose: (c: RPSChoice) => void;
+  onSwitchToButtons: () => void;
+}) {
+  if (mode === 'buttons') {
+    const open = phase === 'CHANT' || phase === 'SHOW';
+    return (
+      <div className="shrink-0 flex flex-col items-center gap-1">
+        <span className="text-base sm:text-lg font-extrabold text-[var(--ink-soft)]">
+          {open ? 'Bấm chọn trước khi máy CHỐT' : 'Nút sẽ mở khi bắt đầu hô'}
+        </span>
+        <div className="flex items-center justify-center gap-2 sm:gap-4">
+          {ALL_RPS_CHOICES.map((c) => {
+            const d = RPS_CHOICES[c];
+            const picked = liveGesture === c && open;
+            return (
+              <button
+                key={c}
+                type="button"
+                disabled={!open}
+                onClick={() => onChoose(c)}
+                className={`btn min-h-0 py-1 px-4 sm:px-6 ${picked ? 'ring-4 ring-[var(--ink)] scale-105' : ''} ${open ? '' : 'opacity-50 cursor-not-allowed'}`}
+                style={{ ['--c' as string]: d.color, ['--cs' as string]: 'rgba(0,0,0,.25)' }}
+              >
+                <img src={d.image} alt="" className="w-10 h-10 sm:w-14 sm:h-14 object-contain" />
+                <span className="text-xl sm:text-2xl">{d.vietnameseName}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="shrink-0 flex flex-wrap items-center justify-center gap-2 sm:gap-3">
+      {ALL_RPS_CHOICES.map((c) => {
+        const d = RPS_CHOICES[c];
+        const loser = RPS_CHOICES[d.beats];
+        return (
+          <div key={c} className="flex items-center gap-1 bg-white rounded-full pl-1 pr-3 py-0.5 border-[3px]" style={{ borderColor: d.color }}>
+            <img src={d.image} alt="" className="w-8 h-8 object-contain" />
+            <span className="font-extrabold text-base sm:text-lg" style={{ color: d.color }}>{d.label}</span>
+            <span className="font-bold text-base sm:text-lg text-[var(--ink-soft)]">{d.verb}</span>
+            <img src={loser.image} alt="" className="w-7 h-7 object-contain" />
+            <span className="font-extrabold text-base sm:text-lg" style={{ color: loser.color }}>{loser.label}</span>
+          </div>
+        );
+      })}
+      <button type="button" className="btn btn-white btn-sm" onClick={onSwitchToButtons}>
+        🖱️ Chơi bằng nút
+      </button>
+    </div>
+  );
+}
+
+// =============================================================================
+// LỚP PHỦ: SANG LƯỢT MỚI, NGHỈ GIỮA VÒNG
+// =============================================================================
+function TurnIntroOverlay({ state: s }: { state: GameState }) {
+  return (
+    <div className="absolute inset-0 z-40 flex items-center justify-center bg-[var(--cream)]/80 anim-fade pointer-events-none">
+      <div
+        key={`${s.round}-${s.turn}`}
+        className="card anim-pop flex flex-col items-center gap-2 px-10 sm:px-16 py-5 sm:py-7"
+        style={{ ['--c' as string]: 'var(--sky)', ['--cs' as string]: 'var(--sky-dark)' }}
+      >
+        <span className="chip text-lg sm:text-xl" style={{ ['--c' as string]: s.round === 1 ? 'var(--sky)' : 'var(--grape)' }}>
+          VÒNG {s.round} {s.round === 1 ? '· Bạn thứ nhất' : '· Bạn thứ hai'}
+        </span>
+        <span className="title text-[clamp(4rem,10vw,8rem)] text-[var(--sky)]">LƯỢT {s.turn}</span>
+        <div className="flex gap-2">
+          {[1, 2, 3, 4, 5].map((t) => (
+            <span
+              key={t}
+              className="w-5 h-5 rounded-full"
+              style={{ background: t < s.turn ? 'var(--win)' : t === s.turn ? 'var(--sky)' : '#e9dfcc' }}
+            />
+          ))}
+        </div>
+        <span className="text-xl sm:text-2xl font-extrabold text-[var(--ink-soft)]">Còn {s.maxTurnsPerRound - s.turn + 1} lượt trong vòng này</span>
+      </div>
+    </div>
+  );
+}
+
+function RoundGapOverlay({ state: s, onStart }: { state: GameState; onStart: () => void }) {
+  return (
+    <div className="absolute inset-0 z-40 flex items-center justify-center bg-[var(--cream)]/90 p-4 anim-fade">
+      <div className="card anim-pop flex flex-col items-center gap-3 px-6 sm:px-12 py-6 max-w-xl w-full text-center" style={{ ['--c' as string]: 'var(--grape)', ['--cs' as string]: 'var(--grape-dark)' }}>
+        <span className="text-5xl">🔄</span>
+        <span className="title text-[clamp(2.4rem,5vw,4rem)] text-[var(--grape)]">HẾT VÒNG 1!</span>
+        <div className="flex gap-3 text-lg sm:text-xl font-extrabold">
+          <span className="chip" style={{ ['--c' as string]: 'var(--win)' }}>Thắng {s.round1Wins}</span>
+          <span className="chip" style={{ ['--c' as string]: 'var(--draw)' }}>Hòa {s.round1Draws}</span>
+          <span className="chip" style={{ ['--c' as string]: 'var(--lose)' }}>Thua {s.round1Losses}</span>
+        </div>
+        <span className="text-xl sm:text-2xl font-extrabold">
+          {s.inputMode === 'camera' ? 'Đổi chỗ! Mời bạn thứ hai giơ tay trước camera.' : 'Đổi chỗ! Mời bạn thứ hai vào bấm chọn.'}
+        </span>
+        <button type="button" className="btn btn-grape text-2xl px-8 min-h-[64px]" onClick={onStart}>
+          Bạn thứ hai sẵn sàng ▶
+        </button>
+        <span className="text-base text-[var(--ink-soft)]">Tự bắt đầu sau {Math.ceil(s.phaseRemaining)} giây</span>
       </div>
     </div>
   );

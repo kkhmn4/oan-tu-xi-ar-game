@@ -1,30 +1,46 @@
 // Engine chính cho game AR Oẳn Tù Xì
-import {
-  AdaptiveRPSAI,
-  AIDifficulty,
-  AIPostMatchInsight,
-  ProbabilityDistribution,
-} from '../ai';
-import {
-  evaluateRPS,
-  getRandomAIChoice,
-  RPSChoice,
-  RPSResult,
-  RPS_CHOICES,
-} from '../data/rps';
+//
+// Mỗi lượt đi qua các pha theo đúng một chiều, mỗi pha có thời lượng cố định
+// để học sinh nhìn màn hình là biết đang ở đâu:
+//
+//   TURN_INTRO  "Lượt 3"                           1,4 s
+//   WAIT_HAND   chờ thấy bàn tay trước camera       (đến khi thấy tay)
+//   CHANT       OẲN, TÙ (lắc nắm tay theo nhịp)    2 x 0,85 s
+//   SHOW        XÌ! ra tay và giữ yên              1,2 s  (máy đếm phiếu ở 0,8 s cuối)
+//   LOCKED      CHỐT! khóa thế tay của người chơi   0,9 s
+//   REVEAL      máy lật bài, báo thắng thua         3,4 s  (bấm "Lượt tiếp" để đi nhanh)
+//   RETRY       không thấy tay lúc chốt: chơi lại lượt đó, không tính điểm
+//
+// Hết lượt 5 của vòng 1 vào ROUND_GAP: đổi bạn, bấm nút để vào vòng 2.
+import { AdaptiveRPSAI, AIDifficulty, AIPostMatchInsight, ProbabilityDistribution } from '../ai';
+import { evaluateRPS, RPSChoice, RPSResult, RPS_CHOICES } from '../data/rps';
 import { audio } from './audio';
-import {
-  detectRPSGesture,
-  HAND_CONNECTIONS,
-  LandmarkPoint,
-} from './gesture';
+import { detectRPSGesture, HAND_CONNECTIONS, LandmarkPoint } from './gesture';
 
 export type GamePhase =
-  | 'CALIBRATING'
-  | 'COUNTDOWN'
-  | 'SHOWDOWN'
+  | 'TURN_INTRO'
+  | 'WAIT_HAND'
+  | 'CHANT'
+  | 'SHOW'
+  | 'LOCKED'
+  | 'REVEAL'
+  | 'RETRY'
   | 'ROUND_GAP'
   | 'GAMEOVER';
+
+export type InputMode = 'camera' | 'buttons';
+
+export const TIMING = {
+  turnIntro: 1.4,
+  chantBeat: 0.85,
+  show: 1.2,
+  showVoteFrom: 0.4, // bỏ 0,4 s đầu của XÌ cho tay kịp thành hình rồi mới đếm phiếu
+  locked: 0.9,
+  reveal: 3.4,
+  retry: 2.2,
+  roundGapAuto: 20,
+  handStableMs: 300,
+};
 
 export interface TurnHistoryItem {
   round: 1 | 2;
@@ -37,8 +53,10 @@ export interface TurnHistoryItem {
 
 export interface GameState {
   phase: GamePhase;
+  phaseProgress: number; // 0..1 của pha hiện tại (dùng cho thanh thời gian)
+  phaseRemaining: number; // giây còn lại của pha hiện tại
   round: 1 | 2;
-  turn: number; // 1 -> 5 trong mỗi vòng (Tổng cộng 10 lượt: 5 lượt V1 + 5 lượt V2)
+  turn: number; // 1 -> 5 trong mỗi vòng
   maxTurnsPerRound: number;
   score: number;
   streak: number;
@@ -52,38 +70,30 @@ export interface GameState {
   totalWins: number;
   totalLosses: number;
   totalDraws: number;
-  countdownSeconds: number; // 3.0s đếm ngược Oẳn - Tù - Xì
   chantWord: 'OẲN' | 'TÙ' | 'XÌ' | '';
-  gapCountdown: number; // 5s gap giữa vòng 1 và vòng 2
-  liveGesture: RPSChoice | null; // Cử chỉ tay người chơi theo thời gian thực (AR)
-  isHandMissing: boolean; // Tạm dừng game khi không phát hiện bàn tay trước camera
-  shufflingAIChoice: RPSChoice; // Chiêu của AI nhảy ngẫu nhiên trong lúc đếm ngược
-  playerChoice: RPSChoice | null;
-  aiChoice: RPSChoice | null;
+  inputMode: InputMode;
+  liveGesture: RPSChoice | null; // thế tay máy đang thấy (chưa chốt)
+  handVisible: boolean;
+  playerChoice: RPSChoice | null; // thế tay đã chốt
+  aiChoice: RPSChoice | null; // chỉ có giá trị từ REVEAL trở đi
   lastResult: RPSResult | null;
+  lastScoreGain: number;
   resultMessage: string;
   resultDetail: string;
+  retryReason: string;
   isGameOver: boolean;
   isWin: boolean;
-  handsVisible: number;
-  screenShake: number;
   history: TurnHistoryItem[];
   difficulty: AIDifficulty;
-  aiStatus: 'analyzing' | 'ready';
-  aiStatusLabel: string;
   predictedPlayerProbabilities?: ProbabilityDistribution;
   aiInsight?: AIPostMatchInsight;
 }
 
-export class GameEngine {
-  private width = 960;
-  private height = 540;
-  private onStateChange: (state: GameState) => void;
-  private adaptiveAI: AdaptiveRPSAI;
-  private pendingAIChoice: RPSChoice = 'rock';
-
-  private state: GameState = {
-    phase: 'CALIBRATING',
+export function createInitialState(difficulty: AIDifficulty = 'normal', inputMode: InputMode = 'camera'): GameState {
+  return {
+    phase: 'TURN_INTRO',
+    phaseProgress: 0,
+    phaseRemaining: TIMING.turnIntro,
     round: 1,
     turn: 1,
     maxTurnsPerRound: 5,
@@ -99,75 +109,60 @@ export class GameEngine {
     totalWins: 0,
     totalLosses: 0,
     totalDraws: 0,
-    countdownSeconds: 3.0,
     chantWord: '',
-    gapCountdown: 5,
+    inputMode,
     liveGesture: null,
-    isHandMissing: false,
-    shufflingAIChoice: 'rock',
+    handVisible: false,
     playerChoice: null,
     aiChoice: null,
     lastResult: null,
+    lastScoreGain: 0,
     resultMessage: '',
     resultDetail: '',
+    retryReason: '',
     isGameOver: false,
     isWin: false,
-    handsVisible: 0,
-    screenShake: 0,
     history: [],
-    difficulty: 'normal',
-    aiStatus: 'ready',
-    aiStatusLabel: 'Sẵn sàng thi đấu',
+    difficulty,
   };
+}
 
-  private currentLandmarks: LandmarkPoint[] | null = null;
-  private liveGesture: RPSChoice | null = null;
-  private liveGestureLabel: string = 'Đang nhận diện...';
-  private phaseTimer: number = 0;
-  private aiShuffleTimer: number = 0;
-  private noHandElapsedMs: number = 0;
-  private lastChantPlayed: string = '';
-  private shockwaves: Array<{ x: number; y: number; r: number; color: string; life: number; age: number }> = [];
-  private particles: Array<{ x: number; y: number; vx: number; vy: number; color: string; size: number; alpha: number }> = [];
+interface Particle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  rot: number;
+  vr: number;
+  color: string;
+  size: number;
+  alpha: number;
+}
 
-  constructor(
-    onStateChange: (state: GameState) => void,
-    initialDifficulty: AIDifficulty = 'normal'
-  ) {
+export class GameEngine {
+  private width = 960;
+  private height = 540;
+  private onStateChange: (state: GameState) => void;
+  private adaptiveAI: AdaptiveRPSAI;
+  private pendingAIChoice: RPSChoice = 'rock';
+  private state: GameState;
+
+  private landmarks: LandmarkPoint[] | null = null; // tọa độ pixel trong khung video (đã lật gương)
+  private videoW = 640;
+  private videoH = 480;
+  private buttonChoice: RPSChoice | null = null;
+  private phaseTime = 0;
+  private handSeenMs = 0;
+  private votes: Record<RPSChoice, number> = { rock: 0, paper: 0, scissors: 0 };
+  private lastSeenInShow: RPSChoice | null = null;
+  private particles: Particle[] = [];
+  private rings: Array<{ x: number; y: number; r: number; color: string; age: number }> = [];
+
+  constructor(onStateChange: (state: GameState) => void, difficulty: AIDifficulty = 'normal', inputMode: InputMode = 'camera') {
     this.onStateChange = onStateChange;
-    this.state.difficulty = initialDifficulty;
-    this.adaptiveAI = new AdaptiveRPSAI({
-      difficulty: initialDifficulty,
-      maxTurns: 10,
-    });
-    this.startCountdown();
-  }
-
-  setDifficulty(difficulty: AIDifficulty) {
-    this.state.difficulty = difficulty;
-    this.adaptiveAI.setDifficulty(difficulty);
-    this.onStateChange({ ...this.state });
-  }
-
-  getAdaptiveAI(): AdaptiveRPSAI {
-    return this.adaptiveAI;
-  }
-
-  private getAIStatusText(turn: number): string {
-    if (turn <= 1) return 'Đang quan sát lượt mở màn';
-    if (turn <= 3) return 'Đang học tần suất ra chiêu';
-    if (turn <= 6) return 'Phân tích thói quen chuyển chiêu';
-    return 'Thích nghi sâu & dự đoán phản đòn';
-  }
-
-  /**
-   * Tính số thứ tự lượt tổng thể (1..10) trên toàn bộ 2 vòng
-   */
-  getOverallTurnNumber(): number {
-    if (this.state.round === 1) {
-      return Math.max(1, Math.min(5, this.state.turn));
-    }
-    return Math.max(6, Math.min(10, 5 + this.state.turn));
+    this.state = createInitialState(difficulty, inputMode);
+    this.adaptiveAI = new AdaptiveRPSAI({ difficulty, maxTurns: 10 });
+    this.startTurn();
   }
 
   resize(w: number, h: number) {
@@ -175,247 +170,313 @@ export class GameEngine {
     this.height = h;
   }
 
-  // Cập nhật tọa độ bàn tay từ MediaPipe
-  updateHand(landmarks: LandmarkPoint[] | null) {
-    this.currentLandmarks = landmarks;
+  getState(): GameState {
+    return { ...this.state, history: [...this.state.history] };
+  }
+
+  getOverallTurnNumber(): number {
+    return this.state.round === 1 ? this.state.turn : 5 + this.state.turn;
+  }
+
+  // ---------------------------------------------------------------------------
+  // ĐẦU VÀO
+  // ---------------------------------------------------------------------------
+
+  /** Tay từ MediaPipe, tọa độ pixel trong khung video đã lật gương. */
+  updateHand(landmarks: LandmarkPoint[] | null, videoW: number, videoH: number) {
+    this.videoW = videoW;
+    this.videoH = videoH;
     const hasHand = !!(landmarks && landmarks.length >= 21);
-    this.state.handsVisible = hasHand ? 1 : 0;
-
-    if (hasHand) {
-      this.noHandElapsedMs = 0;
-      this.state.isHandMissing = false;
-      const detected = detectRPSGesture(landmarks);
-      this.liveGesture = detected.choice;
-      this.liveGestureLabel = detected.label;
-    } else {
-      this.liveGesture = null;
-      this.liveGestureLabel = 'Chưa phát hiện bàn tay';
-    }
-    this.state.liveGesture = this.liveGesture;
+    this.landmarks = hasHand ? landmarks : null;
+    this.state.handVisible = hasHand;
+    this.state.liveGesture = hasHand ? detectRPSGesture(landmarks!).choice : null;
   }
 
-  // Chế độ chơi chuột / dự phòng
-  setMouseChoice(choice: RPSChoice) {
-    this.liveGesture = choice;
-    this.liveGestureLabel = RPS_CHOICES[choice].vietnameseName;
+  /** Chế độ nút bấm: chọn thế tay. Chỉ nhận trong lúc hô và lúc XÌ. */
+  chooseByButton(choice: RPSChoice) {
+    if (this.state.phase !== 'CHANT' && this.state.phase !== 'SHOW') return;
+    this.buttonChoice = choice;
     this.state.liveGesture = choice;
+    audio.playClick();
+    this.emit();
   }
 
-  // Bắt đầu đếm ngược 3s "Oẳn - Tù - Xì"
-  private startCountdown() {
-    const overallTurn = this.getOverallTurnNumber();
-    if (overallTurn > 10) {
+  setInputMode(mode: InputMode) {
+    this.state.inputMode = mode;
+    if (mode === 'buttons') {
+      this.landmarks = null;
+      this.state.handVisible = false;
+      this.state.liveGesture = this.buttonChoice;
+      if (this.state.phase === 'WAIT_HAND') this.enter('CHANT');
+    }
+    this.emit();
+  }
+
+  /** Bấm "Lượt tiếp" trong lúc xem kết quả. */
+  skipReveal() {
+    if (this.state.phase === 'REVEAL') this.advanceTurn();
+  }
+
+  /** Bấm "Bạn thứ hai sẵn sàng" lúc nghỉ giữa vòng. */
+  startRound2() {
+    if (this.state.phase !== 'ROUND_GAP') return;
+    this.state.round = 2;
+    this.state.turn = 1;
+    this.startTurn();
+  }
+
+  // ---------------------------------------------------------------------------
+  // VÒNG ĐỜI MỘT LƯỢT
+  // ---------------------------------------------------------------------------
+
+  private phaseDuration(phase: GamePhase): number {
+    switch (phase) {
+      case 'TURN_INTRO':
+        return TIMING.turnIntro;
+      case 'CHANT':
+        return TIMING.chantBeat * 2;
+      case 'SHOW':
+        return TIMING.show;
+      case 'LOCKED':
+        return TIMING.locked;
+      case 'REVEAL':
+        return TIMING.reveal;
+      case 'RETRY':
+        return TIMING.retry;
+      case 'ROUND_GAP':
+        return TIMING.roundGapAuto;
+      default:
+        return 0;
+    }
+  }
+
+  private enter(phase: GamePhase) {
+    this.state.phase = phase;
+    this.phaseTime = 0;
+    this.state.phaseProgress = 0;
+    this.state.phaseRemaining = this.phaseDuration(phase);
+
+    if (phase === 'CHANT') {
+      this.state.chantWord = 'OẲN';
+      audio.playChant('oan');
+    } else if (phase === 'SHOW') {
+      this.state.chantWord = 'XÌ';
+      this.votes = { rock: 0, paper: 0, scissors: 0 };
+      this.lastSeenInShow = null;
+      audio.playChant('xi');
+    } else if (phase === 'WAIT_HAND') {
+      this.handSeenMs = 0;
+      this.state.chantWord = '';
+    } else {
+      this.state.chantWord = '';
+    }
+    this.emit();
+  }
+
+  private startTurn() {
+    if (this.getOverallTurnNumber() > 10) {
       this.finishGame();
       return;
     }
-
-    this.state.phase = 'COUNTDOWN';
-    this.state.countdownSeconds = 3.0;
-    this.state.chantWord = 'OẲN';
-    this.state.playerChoice = null;
-    this.noHandElapsedMs = 0;
-    this.state.isHandMissing = false;
-    this.state.aiChoice = null;
-    this.state.aiStatus = 'analyzing';
-
-    // AI chuẩn bị dự đoán và chốt nước TRƯỚC KHI người chơi ra chiêu (Tuân thủ nghiêm ngặt Anti-leakage)
-    const prediction = this.adaptiveAI.prepareTurn(overallTurn);
+    // Máy chốt lựa chọn của nó NGAY ĐẦU LƯỢT, trước khi người chơi ra tay (không nhìn trộm).
+    const prediction = this.adaptiveAI.prepareTurn(this.getOverallTurnNumber());
     this.pendingAIChoice = prediction.chosenAIChoice;
     this.state.predictedPlayerProbabilities = prediction.predictedPlayerProbabilities;
-    this.state.aiStatus = 'ready';
-    this.state.aiStatusLabel = this.getAIStatusText(overallTurn);
 
-    this.state.shufflingAIChoice = getRandomAIChoice();
-    this.state.liveGesture = this.liveGesture;
+    this.buttonChoice = null;
+    this.state.playerChoice = null;
+    this.state.aiChoice = null;
     this.state.lastResult = null;
+    this.state.lastScoreGain = 0;
     this.state.resultMessage = '';
     this.state.resultDetail = '';
-    this.phaseTimer = 0;
-    this.aiShuffleTimer = 0;
-    this.lastChantPlayed = '';
-    this.state.screenShake = 0;
-    this.onStateChange({ ...this.state });
+    this.state.retryReason = '';
+    if (this.state.inputMode === 'buttons') this.state.liveGesture = null;
+    audio.playNewTurn();
+    this.enter('TURN_INTRO');
   }
 
   update(dtMs: number) {
     const dt = dtMs / 1000;
-
-    // Không rung lắc màn hình (hoạt ảnh lắc nhẹ tại 2 hình Kéo/Búa/Bao)
-    this.state.screenShake = 0;
-
-    // Cập nhật hiệu ứng hạt & sóng xung kích
     this.updateVFX(dt);
 
-    if (this.state.phase === 'COUNTDOWN') {
-      // 1. NẾU KHÔNG CÓ BÀN TAY TRONG CAMERA: TẠM DỪNG GAME & BẬT POPUP NHẮC NHỞ
-      if (this.state.handsVisible === 0) {
-        this.noHandElapsedMs += dtMs;
-        if (this.noHandElapsedMs >= 250) {
-          if (!this.state.isHandMissing) {
-            this.state.isHandMissing = true;
-            this.onStateChange({ ...this.state });
-          }
-          return; // TẠM DỪNG: Không trừ thời gian, giữ nguyên nhịp hô!
+    const phase = this.state.phase;
+    if (phase === 'GAMEOVER') return;
+
+    this.phaseTime += dt;
+    const dur = this.phaseDuration(phase);
+    if (dur > 0) {
+      this.state.phaseProgress = Math.min(1, this.phaseTime / dur);
+      this.state.phaseRemaining = Math.max(0, dur - this.phaseTime);
+    }
+
+    switch (phase) {
+      case 'TURN_INTRO':
+        if (this.phaseTime >= dur) {
+          this.enter(this.state.inputMode === 'camera' && !this.state.handVisible ? 'WAIT_HAND' : 'CHANT');
+          return;
         }
-      } else {
-        this.noHandElapsedMs = 0;
-        if (this.state.isHandMissing) {
-          this.state.isHandMissing = false;
-          this.onStateChange({ ...this.state });
+        break;
+
+      case 'WAIT_HAND':
+        if (this.state.inputMode !== 'camera') {
+          this.enter('CHANT');
+          return;
         }
-      }
-
-      this.state.countdownSeconds -= dt;
-
-      // Nhảy random ảnh chiêu thức bên máy liên tục trong lúc đếm ngược
-      this.aiShuffleTimer += dt;
-      if (this.aiShuffleTimer >= 0.11) {
-        this.aiShuffleTimer = 0;
-        const all: RPSChoice[] = ['rock', 'scissors', 'paper'];
-        const candidates = all.filter((c) => c !== this.state.shufflingAIChoice);
-        this.state.shufflingAIChoice = candidates[Math.floor(Math.random() * candidates.length)];
-      }
-
-      // Giữ đồng bộ nhận diện tay người chơi
-      this.state.liveGesture = this.liveGesture;
-
-      // Xử lý đếm nhịp "OẲN - TÙ - XÌ"
-      if (this.state.countdownSeconds > 2.0) {
-        this.state.chantWord = 'OẲN';
-        if (this.lastChantPlayed !== 'oan') {
-          this.lastChantPlayed = 'oan';
-          audio.playChant('oan');
+        this.handSeenMs = this.state.handVisible ? this.handSeenMs + dtMs : 0;
+        if (this.handSeenMs >= TIMING.handStableMs) {
+          this.enter('CHANT');
+          return;
         }
-      } else if (this.state.countdownSeconds > 1.0) {
-        this.state.chantWord = 'TÙ';
-        if (this.lastChantPlayed !== 'tu') {
-          this.lastChantPlayed = 'tu';
+        break;
+
+      case 'CHANT':
+        if (this.phaseTime >= TIMING.chantBeat && this.state.chantWord === 'OẲN') {
+          this.state.chantWord = 'TÙ';
           audio.playChant('tu');
         }
-      } else if (this.state.countdownSeconds > 0) {
-        this.state.chantWord = 'XÌ';
-        if (this.lastChantPlayed !== 'xi') {
-          this.lastChantPlayed = 'xi';
-          audio.playChant('xi');
+        if (this.phaseTime >= dur) {
+          this.enter('SHOW');
+          return;
         }
-      } else {
-        // HẾT PHẦN ĐẾM NGƯỢC -> GHI NHẬN TƯ THẾ TAY SAU CÙNG CỦA NGƯỜI CHƠI
-        this.resolveShowdown();
-        return;
+        break;
+
+      case 'SHOW': {
+        const g = this.state.inputMode === 'buttons' ? this.buttonChoice : this.state.liveGesture;
+        if (g) this.lastSeenInShow = g;
+        if (g && this.phaseTime >= TIMING.showVoteFrom) this.votes[g] += dtMs;
+        if (this.phaseTime >= dur) {
+          this.lockPlayer();
+          return;
+        }
+        break;
       }
 
-      this.onStateChange({ ...this.state });
-    } else if (this.state.phase === 'SHOWDOWN') {
-      this.phaseTimer += dt;
-      // Dừng lại 2.2 giây để người chơi thấy rõ kết quả trước khi sang lượt tiếp theo
-      if (this.phaseTimer >= 2.2) {
-        this.advanceTurn();
-      }
-    } else if (this.state.phase === 'ROUND_GAP') {
-      this.state.gapCountdown -= dt;
-      if (this.state.gapCountdown <= 0) {
-        // Hết 5s nghỉ giữa 2 vòng -> Bắt đầu Vòng 2!
-        this.state.round = 2;
-        this.state.turn = 1;
-        this.startCountdown();
-      } else {
-        this.onStateChange({ ...this.state });
-      }
+      case 'LOCKED':
+        if (this.phaseTime >= dur) {
+          this.reveal();
+          return;
+        }
+        break;
+
+      case 'REVEAL':
+        if (this.phaseTime >= dur) {
+          this.advanceTurn();
+          return;
+        }
+        break;
+
+      case 'RETRY':
+        if (this.phaseTime >= dur) {
+          this.startTurn();
+          return;
+        }
+        break;
+
+      case 'ROUND_GAP':
+        if (this.phaseTime >= dur) {
+          this.startRound2();
+          return;
+        }
+        break;
     }
+
+    this.emit();
   }
 
-  // Ghi nhận tư thế sau cùng và so tài với AI
-  private resolveShowdown() {
-    const overallTurn = this.getOverallTurnNumber();
-    this.state.phase = 'SHOWDOWN';
-    this.state.countdownSeconds = 0;
-    this.phaseTimer = 0;
-    this.state.screenShake = 0;
+  /** Hết XÌ: thế tay xuất hiện lâu nhất trong cửa sổ đếm phiếu là thế tay được chốt. */
+  private lockPlayer() {
+    let best: RPSChoice | null = null;
+    let bestMs = 0;
+    for (const c of ['rock', 'paper', 'scissors'] as RPSChoice[]) {
+      if (this.votes[c] > bestMs) {
+        bestMs = this.votes[c];
+        best = c;
+      }
+    }
+    const locked = best ?? this.lastSeenInShow;
 
-    // Tư thế tay sau cùng của người chơi
-    let player = this.liveGesture;
-    if (!player) {
-      // Nếu không bắt được tay lúc hết đếm ngược -> mặc định ra búa
-      player = 'rock';
+    if (!locked) {
+      this.state.retryReason =
+        this.state.inputMode === 'buttons'
+          ? 'Em chưa bấm chọn Búa, Kéo hay Bao.'
+          : 'Máy chưa thấy rõ tay em lúc XÌ.';
+      audio.playLose();
+      this.enter('RETRY');
+      return;
     }
 
-    // Lấy chiêu thức đã được AI khóa trước từ lúc bắt đầu đếm ngược qua thuật toán thích nghi
+    this.state.playerChoice = locked;
+    audio.playLock();
+    this.spawnRing(this.width * 0.25, this.height * 0.5, '#1E9BFF');
+    this.enter('LOCKED');
+  }
+
+  private reveal() {
+    const overallTurn = this.getOverallTurnNumber();
+    const player = this.state.playerChoice!;
     const ai = this.pendingAIChoice;
     const evaluation = evaluateRPS(player, ai);
-
-    // AI cập nhật hồ sơ và học hỏi từ kết quả vừa xảy ra
     this.adaptiveAI.recordTurnResult(overallTurn, player, evaluation.result);
-    this.state.aiStatus = 'analyzing';
-    this.state.aiStatusLabel = 'Đang cập nhật phân phối xác suất...';
 
-    this.state.playerChoice = player;
     this.state.aiChoice = ai;
-    this.state.shufflingAIChoice = ai;
     this.state.lastResult = evaluation.result;
     this.state.resultMessage = evaluation.message;
     this.state.resultDetail = evaluation.detail;
 
-    let scoreGain = 0;
+    let gain = 0;
+    const r1 = this.state.round === 1;
     if (evaluation.result === 'win') {
-      scoreGain = 100 + this.state.streak * 20;
-      this.state.score += scoreGain;
+      gain = 100;
       this.state.streak += 1;
       this.state.bestStreak = Math.max(this.state.bestStreak, this.state.streak);
-      if (this.state.round === 1) this.state.round1Wins += 1;
+      if (r1) this.state.round1Wins += 1;
       else this.state.round2Wins += 1;
       this.state.totalWins += 1;
       audio.playWin();
       this.spawnConfetti();
     } else if (evaluation.result === 'draw') {
-      scoreGain = 30;
-      this.state.score += scoreGain;
-      if (this.state.round === 1) this.state.round1Draws += 1;
+      gain = 30;
+      if (r1) this.state.round1Draws += 1;
       else this.state.round2Draws += 1;
       this.state.totalDraws += 1;
       audio.playDraw();
     } else {
-      scoreGain = 0;
       this.state.streak = 0;
-      if (this.state.round === 1) this.state.round1Losses += 1;
+      if (r1) this.state.round1Losses += 1;
       else this.state.round2Losses += 1;
       this.state.totalLosses += 1;
       audio.playLose();
     }
-
+    this.state.score += gain;
+    this.state.lastScoreGain = gain;
     audio.playClash();
-    this.spawnShockwave(this.width / 2, this.height / 2, evaluation.result === 'win' ? '#10B981' : evaluation.result === 'lose' ? '#EF4444' : '#F59E0B');
+    this.spawnRing(
+      this.width / 2,
+      this.height / 2,
+      evaluation.result === 'win' ? '#22C55E' : evaluation.result === 'lose' ? '#EF4444' : '#FFB800'
+    );
 
-    // Lưu vào lịch sử đấu
     this.state.history.push({
       round: this.state.round,
       turn: this.state.turn,
       playerChoice: player,
       aiChoice: ai,
       result: evaluation.result,
-      scoreGain,
+      scoreGain: gain,
     });
-
-    this.onStateChange({ ...this.state });
+    this.enter('REVEAL');
   }
 
-  // Chuyển lượt hoặc chuyển vòng đấu
   private advanceTurn() {
     if (this.state.turn < this.state.maxTurnsPerRound) {
-      // Tiếp tục lượt tiếp theo trong cùng vòng
       this.state.turn += 1;
-      this.startCountdown();
+      this.startTurn();
+    } else if (this.state.round === 1) {
+      audio.playNewTurn();
+      this.enter('ROUND_GAP');
     } else {
-      // Đã xong 5 lượt của vòng hiện tại
-      if (this.state.round === 1) {
-        // Hết Vòng 1 -> Vào khoảng gap 5s chuẩn bị Vòng 2 (Người chơi 2)
-        this.state.phase = 'ROUND_GAP';
-        this.state.gapCountdown = 5.0;
-        this.state.chantWord = '';
-        this.onStateChange({ ...this.state });
-      } else {
-        // Hết cả 2 vòng (đúng 10 lượt) -> Kết thúc game và tạo nhận định AI!
-        this.finishGame();
-      }
+      this.finishGame();
     }
   }
 
@@ -424,184 +485,119 @@ export class GameEngine {
     this.state.isGameOver = true;
     this.state.isWin = this.state.totalWins > this.state.totalLosses;
     this.state.aiInsight = this.adaptiveAI.generatePostMatchInsight();
-    this.onStateChange({ ...this.state });
+    this.emit();
   }
 
-  private updateVFX(dt: number) {
-    // Sóng xung kích
-    for (let i = this.shockwaves.length - 1; i >= 0; i--) {
-      const sw = this.shockwaves[i];
-      sw.age += dt;
-      sw.r += dt * 380;
-      if (sw.age >= sw.life) {
-        this.shockwaves.splice(i, 1);
-      }
-    }
+  private emit() {
+    this.onStateChange({ ...this.state, history: [...this.state.history] });
+  }
 
-    // Hạt pháo hoa
+  // ---------------------------------------------------------------------------
+  // HIỆU ỨNG (canvas trong suốt phủ lên sân chơi)
+  // ---------------------------------------------------------------------------
+
+  private updateVFX(dt: number) {
+    for (let i = this.rings.length - 1; i >= 0; i--) {
+      const r = this.rings[i];
+      r.age += dt;
+      r.r += dt * 520;
+      if (r.age >= 0.7) this.rings.splice(i, 1);
+    }
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i];
       p.x += p.vx * dt;
       p.y += p.vy * dt;
-      p.vy += dt * 250; // Trọng lực
-      p.alpha -= dt * 0.9;
-      if (p.alpha <= 0) {
-        this.particles.splice(i, 1);
-      }
+      p.vy += dt * 520;
+      p.rot += p.vr * dt;
+      p.alpha -= dt * 0.55;
+      if (p.alpha <= 0 || p.y > this.height + 40) this.particles.splice(i, 1);
     }
   }
 
-  private spawnShockwave(x: number, y: number, color: string) {
-    this.shockwaves.push({ x, y, r: 20, color, life: 0.6, age: 0 });
+  private spawnRing(x: number, y: number, color: string) {
+    this.rings.push({ x, y, r: 30, color, age: 0 });
   }
 
   private spawnConfetti() {
-    const colors = ['#10B981', '#F59E0B', '#3B82F6', '#EC4899', '#8B5CF6'];
-    for (let i = 0; i < 45; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const speed = Math.random() * 280 + 120;
+    const colors = ['#FF8A1F', '#FF4F8B', '#22C55E', '#1E9BFF', '#8B5CF6', '#FFC21A'];
+    for (let i = 0; i < 90; i++) {
+      const fromLeft = i % 2 === 0;
       this.particles.push({
-        x: this.width / 2,
-        y: this.height / 2,
-        vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed - 100,
-        color: colors[Math.floor(Math.random() * colors.length)],
-        size: Math.random() * 6 + 3,
-        alpha: 1,
+        x: fromLeft ? this.width * 0.1 : this.width * 0.9,
+        y: this.height * 0.85,
+        vx: (fromLeft ? 1 : -1) * (Math.random() * 380 + 120),
+        vy: -(Math.random() * 520 + 380),
+        rot: Math.random() * Math.PI,
+        vr: (Math.random() - 0.5) * 12,
+        color: colors[i % colors.length],
+        size: Math.random() * 8 + 7,
+        alpha: 1.3,
       });
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // CANVAS RENDERING
-  // ---------------------------------------------------------------------------
   draw(ctx: CanvasRenderingContext2D) {
-    const { width: w, height: h } = this;
-
-    ctx.save();
-
-    // 1. Vẽ nền đấu trường Cyber
-    this.drawBackground(ctx, w, h);
-
-    // 2. Vẽ AR Skeleton trên bàn tay người chơi
-    if (this.currentLandmarks && this.currentLandmarks.length >= 21) {
-      this.drawHandSkeleton(ctx, this.currentLandmarks);
+    for (const r of this.rings) {
+      ctx.globalAlpha = Math.max(0, 1 - r.age / 0.7);
+      ctx.strokeStyle = r.color;
+      ctx.lineWidth = 10 * (1 - r.age / 0.7) + 2;
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, r.r, 0, Math.PI * 2);
+      ctx.stroke();
     }
-
-    // 3. Vẽ sóng xung kích & hạt
-    this.drawVFX(ctx);
-
-    ctx.restore();
+    for (const p of this.particles) {
+      ctx.globalAlpha = Math.min(1, Math.max(0, p.alpha));
+      ctx.fillStyle = p.color;
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.rot);
+      ctx.fillRect(-p.size / 2, -p.size / 3, p.size, p.size * 0.66);
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
   }
 
-  private drawBackground(ctx: CanvasRenderingContext2D, w: number, h: number) {
-    const grad = ctx.createRadialGradient(w / 2, h / 2, 20, w / 2, h / 2, Math.max(w, h));
-    grad.addColorStop(0, '#091330');
-    grad.addColorStop(1, '#030714');
-    ctx.fillStyle = grad;
+  /** Ô "Máy nhìn thấy": vẽ khung xương 21 điểm của bàn tay, không vẽ hình camera (C-108). */
+  drawHandPreview(ctx: CanvasRenderingContext2D, w: number, h: number) {
+    ctx.fillStyle = '#EAF6FF';
     ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = '#C9E6FF';
+    for (let x = 10; x < w; x += 18) for (let y = 10; y < h; y += 18) ctx.fillRect(x, y, 2, 2);
 
-    // Vạch chia đôi võ đài Player vs AI
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([8, 8]);
-    ctx.beginPath();
-    ctx.moveTo(w / 2, 0);
-    ctx.lineTo(w / 2, h);
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
+    const lm = this.landmarks;
+    if (!lm) return;
+    const s = Math.min(w / this.videoW, h / this.videoH);
+    const ox = (w - this.videoW * s) / 2;
+    const oy = (h - this.videoH * s) / 2;
+    const pt = (i: number) => [ox + lm[i].x * s, oy + lm[i].y * s] as const;
 
-  // Vẽ khung xương Skeleton AR 21 khớp
-  private drawHandSkeleton(ctx: CanvasRenderingContext2D, lm: LandmarkPoint[]) {
-    ctx.save();
+    const g = this.state.playerChoice && (this.state.phase === 'LOCKED' || this.state.phase === 'REVEAL')
+      ? this.state.playerChoice
+      : this.state.liveGesture;
+    const color = g ? RPS_CHOICES[g].color : '#1E9BFF';
+
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-
-    const gesture = this.liveGesture;
-    const themeColor =
-      gesture === 'rock' ? '#F59E0B' : gesture === 'scissors' ? '#EF4444' : gesture === 'paper' ? '#10B981' : '#38BDF8';
-
-    // 1. Vẽ các đường xương
-    ctx.strokeStyle = themeColor;
-    ctx.lineWidth = 3.5;
-    ctx.shadowColor = themeColor;
-    ctx.shadowBlur = 14;
-
-    for (const [fromIdx, toIdx] of HAND_CONNECTIONS) {
-      const p1 = lm[fromIdx];
-      const p2 = lm[toIdx];
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(3, w / 40);
+    for (const [a, b] of HAND_CONNECTIONS) {
+      const [x1, y1] = pt(a);
+      const [x2, y2] = pt(b);
       ctx.beginPath();
-      ctx.moveTo(p1.x, p1.y);
-      ctx.lineTo(p2.x, p2.y);
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
       ctx.stroke();
     }
-
-    // 2. Vẽ 21 khớp tròn
-    ctx.shadowBlur = 0;
+    const tips = [4, 8, 12, 16, 20];
     for (let i = 0; i < lm.length; i++) {
-      const pt = lm[i];
-      const isTip = [4, 8, 12, 16, 20].includes(i);
+      const [x, y] = pt(i);
       ctx.beginPath();
-      ctx.arc(pt.x, pt.y, isTip ? 6.5 : 4, 0, Math.PI * 2);
-      ctx.fillStyle = isTip ? '#FFFFFF' : themeColor;
+      ctx.arc(x, y, tips.includes(i) ? w / 34 : w / 55, 0, Math.PI * 2);
+      ctx.fillStyle = '#FFFFFF';
       ctx.fill();
-      ctx.strokeStyle = '#FFFFFF';
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = color;
       ctx.stroke();
     }
-
-    // 3. Huy hiệu tên chiêu thức nổi trên cổ tay
-    const wrist = lm[0];
-    ctx.fillStyle = 'rgba(5, 12, 34, 0.88)';
-    ctx.strokeStyle = themeColor;
-    ctx.lineWidth = 2;
-    ctx.shadowColor = themeColor;
-    ctx.shadowBlur = 12;
-    ctx.beginPath();
-    ctx.roundRect(wrist.x - 65, wrist.y + 15, 130, 32, 10);
-    ctx.fill();
-    ctx.stroke();
-
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = '900 13px system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.shadowBlur = 0;
-    ctx.fillText(this.liveGestureLabel, wrist.x, wrist.y + 31);
-
-    ctx.restore();
-  }
-
-  private drawVFX(ctx: CanvasRenderingContext2D) {
-    // Sóng xung kích
-    for (const sw of this.shockwaves) {
-      const progress = sw.age / sw.life;
-      ctx.save();
-      ctx.globalAlpha = 1 - progress;
-      ctx.strokeStyle = sw.color;
-      ctx.lineWidth = 4 * (1 - progress);
-      ctx.shadowColor = sw.color;
-      ctx.shadowBlur = 18;
-      ctx.beginPath();
-      ctx.arc(sw.x, sw.y, sw.r, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    // Hạt pháo hoa
-    for (const p of this.particles) {
-      ctx.save();
-      ctx.globalAlpha = p.alpha;
-      ctx.fillStyle = p.color;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-    }
-  }
-
-  getState(): GameState {
-    return { ...this.state };
   }
 }

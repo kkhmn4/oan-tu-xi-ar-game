@@ -70,7 +70,7 @@ export function HandSkeletonSvg({
 
   return (
     <svg
-      viewBox="0 0 100 100"
+      viewBox="-6 -4 112 108"
       className={className}
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
@@ -100,7 +100,7 @@ export function HandSkeletonSvg({
               x2={p2[0]}
               y2={p2[1]}
               stroke={color}
-              strokeWidth="2.8"
+              strokeWidth="4.2"
               strokeLinecap="round"
               strokeOpacity="0.88"
             />
@@ -119,16 +119,16 @@ export function HandSkeletonSvg({
             {isTip && (
               <circle
                 cx={x}
-                y={y}
-                r="4.5"
+                cy={y}
+                r="6.2"
                 fill={color}
                 fillOpacity="0.35"
               />
             )}
             <circle
               cx={x}
-              y={y}
-              r={isTip ? 3.2 : isWrist ? 3.5 : 2.4}
+              cy={y}
+              r={isTip ? 4.4 : isWrist ? 4.4 : 3.2}
               fill={isTip ? '#FFFFFF' : color}
               stroke={isTip ? color : '#FFFFFF'}
               strokeWidth="1.2"

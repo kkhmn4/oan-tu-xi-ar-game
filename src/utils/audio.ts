@@ -201,6 +201,67 @@ class SoundFX {
     osc.stop(now + 0.05);
   }
 
+  // Tiếng "tách" như bấm máy ảnh: lúc máy chốt thế tay
+  playLock() {
+    if (this.isMuted) return;
+    this.init();
+    if (!this.ctx || !this.sfxGain) return;
+
+    const now = this.ctx.currentTime;
+    const len = Math.floor(this.ctx.sampleRate * 0.08);
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 3;
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buf;
+    const hp = this.ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 1800;
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.9, now);
+    noise.connect(hp);
+    hp.connect(gain);
+    gain.connect(this.sfxGain);
+    noise.start(now);
+
+    const osc = this.ctx.createOscillator();
+    const g2 = this.ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(1320, now + 0.05);
+    g2.gain.setValueAtTime(0.0001, now);
+    g2.gain.setValueAtTime(0.25, now + 0.05);
+    g2.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+    osc.connect(g2);
+    g2.connect(this.sfxGain);
+    osc.start(now);
+    osc.stop(now + 0.17);
+  }
+
+  // Hai nốt "ding dong": báo sang lượt mới
+  playNewTurn() {
+    if (this.isMuted) return;
+    this.init();
+    if (!this.ctx || !this.sfxGain) return;
+
+    const now = this.ctx.currentTime;
+    [
+      [784, 0],
+      [1046.5, 0.14],
+    ].forEach(([freq, t]) => {
+      const osc = this.ctx!.createOscillator();
+      const gain = this.ctx!.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now + t);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.setValueAtTime(0.35, now + t);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + t + 0.35);
+      osc.connect(gain);
+      gain.connect(this.sfxGain!);
+      osc.start(now + t);
+      osc.stop(now + t + 0.36);
+    });
+  }
+
   startMusic() {
     if (this.musicPlaying) return;
     this.init();

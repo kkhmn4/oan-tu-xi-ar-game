@@ -21,6 +21,12 @@ export async function toggleFullscreen(): Promise<boolean> {
       } else if (docEl.msRequestFullscreen) {
         await docEl.msRequestFullscreen();
       }
+      // Máy tính bảng: khóa màn ngang khi vào toàn màn hình (trình duyệt không hỗ trợ thì bỏ qua)
+      try {
+        await (screen.orientation as any)?.lock?.('landscape');
+      } catch {
+        // bỏ qua
+      }
       return true;
     } else {
       const doc = document as any;

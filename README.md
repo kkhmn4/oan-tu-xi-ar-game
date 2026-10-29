@@ -1,5 +1,14 @@
 # ✌️✊✋ Game AR Oẳn Tù Xì · Manabie AI Lab
 
+> **Bản nâng cấp cho máy tính bảng (29/10/2026)**, fork từ `hoang-tuannguyen-manabie/oan-tu-xi-ar-game`:
+> - Giao diện sáng màu cho học sinh nhỏ: nền kem, thẻ trắng viền dày, chữ Baloo 2, bàn tay và Bot 3D.
+> - Mỗi lượt đi theo 4 bước rõ ràng: **Giơ tay, Oẳn tù xì, Chốt tay, Kết quả**. Máy chốt thế tay ở cuối chữ **XÌ** (thanh đỏ chạy hết), lấy thế tay xuất hiện lâu nhất trong khoảng XÌ.
+> - Không thấy tay lúc chốt thì chơi lại lượt đó (không tự gán Búa). Có thẻ "LƯỢT n" báo lượt mới, màn nghỉ đổi bạn giữa hai vòng.
+> - Không có camera hoặc mất mạng thì chơi bằng 3 nút bấm. Không hiện hình camera, chỉ vẽ khung xương bàn tay.
+> - Logic lượt: `src/utils/engine.ts`. Triển khai Netlify theo `netlify.toml`.
+>
+> Phần dưới là mô tả của bản gốc.
+
 Ứng dụng trò chơi tương tác thực tế ảo tăng cường (**Augmented Reality**) "Oẳn Tù Xì" (Rock - Paper - Scissors) nhận diện cử chỉ bàn tay qua Camera AI thời gian thực, xây dựng riêng cho các sự kiện Workshop & Team Building của **Manabie AI Lab**.
 
 ---
