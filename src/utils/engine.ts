@@ -44,9 +44,8 @@ export const TIMING = {
   roundGapAuto: 20,
   handStableMs: 300,
   shakeIdle: 1.6, // ngừng lắc quá lâu thì hiện lời nhắc
-  shakeSwings: 5, // số lần tay đổi chiều để vòng đầy: lắc qua lại khoảng 3 lần
-  shakeAmp: 0.18, // mỗi lần đổi chiều, tay phải đi ít nhất chừng này lần chiều dài lòng bàn tay (lọc tay rung)
-  shakeMinGap: 0.1, // hai lần đổi chiều cách nhau ít nhất chừng này giây
+  shakeTravel: 2.4, // khung xương đi tổng cộng chừng này lần chiều dài lòng bàn tay thì vòng đầy (lắc nhẹ ~3 lần)
+  shakeFloor: 0.5, // tốc độ dưới mức này (lòng bàn tay mỗi giây) là tay đứng yên hoặc rung nhẹ, không tính
   shakeJump: 0.8, // nhảy xa hơn mức này giữa hai lần đo là nhận diện bị giật, bỏ qua
 };
 
@@ -153,13 +152,6 @@ interface Particle {
   alpha: number;
 }
 
-interface Pt {
-  x: number;
-  y: number;
-}
-
-const dist = (a: Pt, b: Pt) => Math.hypot(a.x - b.x, a.y - b.y);
-
 export class GameEngine {
   private width = 960;
   private height = 540;
@@ -179,10 +171,8 @@ export class GameEngine {
   private holdTime = 0;
   private missTime = 0;
   // Bộ đo lắc tay: cộng dồn quãng đường tâm bàn tay đi được, hướng nào cũng được
-  private shakePos: Pt | null = null;
-  private shakeExt: Pt | null = null; // điểm đổi chiều gần nhất
-  private shakeFar: Pt | null = null; // điểm xa điểm đổi chiều nhất kể từ đó
-  private shakeSwings = 0;
+  private shakePrev: LandmarkPoint[] | null = null; // khung xương lần đo trước
+  private shakePrevAt = 0;
   private lastShakeGainAt = 0;
   private previewDirty = true;
   private particles: Particle[] = [];
@@ -242,38 +232,31 @@ export class GameEngine {
   }
 
   private resetShake() {
-    this.shakePos = null;
-    this.shakeExt = null;
-    this.shakeFar = null;
+    this.shakePrev = null;
   }
 
   /**
-   * Lắc tay: đếm số lần tâm bàn tay đổi chiều (hướng nào cũng được), lắc mạnh hay nhẹ đều như nhau.
-   * Tay đi ra xa điểm đổi chiều trước rồi quay lại đủ xa = một lần đổi chiều; 5 lần (lắc qua lại ~3 lần) là vòng đầy.
+   * Lắc tay: đo chuyển động của cả khung xương 21 điểm (cổ tay, lòng bàn tay, từng đốt ngón),
+   * nên lắc dọc, lắc ngang, lắc chéo hay vẫy tay đều làm vòng đầy. Tốc độ tính theo chiều dài lòng bàn tay
+   * mỗi giây, trừ đi phần rung nhẹ khi tay đứng yên; nhận diện nhanh hay chậm đều ra cùng kết quả.
    */
   private trackShake(lm: LandmarkPoint[]) {
-    const palm = Math.hypot(lm[9].x - lm[0].x, lm[9].y - lm[0].y) || 1;
-    const raw = { x: (lm[0].x + lm[9].x) / 2, y: (lm[0].y + lm[9].y) / 2 };
-    const prev = this.shakePos;
-    const p = prev ? { x: prev.x * 0.35 + raw.x * 0.65, y: prev.y * 0.35 + raw.y * 0.65 } : raw;
-    this.shakePos = p;
+    const prev = this.shakePrev;
+    const dt = this.clock - this.shakePrevAt;
+    this.shakePrev = lm.map((q) => ({ x: q.x, y: q.y }));
+    this.shakePrevAt = this.clock;
     if (this.state.phase !== 'CHANT' || this.state.inputMode !== 'camera') return;
-    if (!prev || !this.shakeExt || !this.shakeFar || dist(p, prev) / palm > TIMING.shakeJump) {
-      this.shakeExt = p;
-      this.shakeFar = p;
-      return;
-    }
-    if (dist(p, this.shakeExt) > dist(this.shakeFar, this.shakeExt)) this.shakeFar = p;
-    const amp = TIMING.shakeAmp * palm;
-    if (dist(this.shakeFar, this.shakeExt) >= amp && dist(p, this.shakeFar) >= amp * 0.8) {
-      // Tay vừa quay đầu ở điểm xa nhất: đó là điểm đổi chiều mới
-      this.shakeExt = this.shakeFar;
-      this.shakeFar = p;
-      if (this.clock - this.lastShakeGainAt < TIMING.shakeMinGap) return;
-      this.lastShakeGainAt = this.clock;
-      this.shakeSwings += 1;
-      this.setShakeProgress(this.shakeSwings / TIMING.shakeSwings);
-    }
+    if (!prev || dt <= 0 || dt > 0.3) return;
+
+    const palm = Math.hypot(lm[9].x - lm[0].x, lm[9].y - lm[0].y) || 1;
+    let sum = 0;
+    for (let i = 0; i < lm.length; i++) sum += Math.hypot(lm[i].x - prev[i].x, lm[i].y - prev[i].y);
+    const move = sum / lm.length / palm; // quãng đường trung bình một điểm, theo lòng bàn tay
+    if (move > TIMING.shakeJump) return;
+    const gain = Math.max(0, move / dt - TIMING.shakeFloor) * dt;
+    if (gain <= 0) return;
+    this.lastShakeGainAt = this.clock;
+    this.setShakeProgress(this.state.shakeProgress + gain / TIMING.shakeTravel);
   }
 
   /** Vòng lắc đầy tới đâu thì hô tới đó: 1/3 OẲN, 2/3 TÙ, đầy hết XÌ rồi mở thẻ. */
@@ -373,9 +356,7 @@ export class GameEngine {
       this.state.shakeProgress = 0;
       this.state.chantWord = '';
       this.lastShakeGainAt = this.clock;
-      this.shakeSwings = 0;
-      this.shakeExt = null;
-      this.shakeFar = null;
+      this.shakePrev = null;
     } else if (phase === 'SHOW') {
       this.state.chantWord = 'XÌ';
       this.state.beat = 3;
